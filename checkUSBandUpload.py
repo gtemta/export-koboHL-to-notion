@@ -39,13 +39,14 @@ def execute_notion_upload(destination_dir):
             return
 
         os.chdir(destination_dir)
+        process = None  # 初始化變數，避免未定義錯誤
         if UsPython:
             uploadToNotion.export_highlights()
-        else:
-            process = subprocess.Popen(
-                ["npm", "start"],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                shell=True, encoding='utf-8')
+        # else:
+        #     process = subprocess.Popen(
+        #         ["npm", "start"],
+        #         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        #         shell=True, encoding='utf-8')
         while True:
             output_line = process.stdout.readline()
             if not output_line and process.poll() is not None:

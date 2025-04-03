@@ -3,6 +3,8 @@ import DBReader
 from notion_client import Client
 from datetime import datetime
 import math
+import requests
+
 
 
 # Load environment variables from a .env file
@@ -149,6 +151,7 @@ def update_time_related(page_id, book):
     update_book_time(page_id,"LastReadDate", book.get_date_last_read())
     update_book_time(page_id, "LastFinishedReadTime", book.get_last_time_finished_reading())
     update_percentage(page_id, book.get_percent_read())
+    print("Finish Update Time")
 
 def update_book_people(page_id, publisher_name=None, author_name=None):
     properties_to_update = {}
@@ -278,42 +281,106 @@ def append_blocks_to_page(page_id, blocks):
         children=blocks,
     )
 
+def get_google_books_cover(title):
+    """透過 Google Books API 查詢書籍封面（高解析度）"""
+    url = f"https://www.googleapis.com/books/v1/volumes?q=intitle:{title.replace(' ', '+')}&maxResults=1"
+    response = requests.get(url)
+    print(f"Google Books API Response: {response.status_code}")
+    
+    if response.status_code == 200:
+        data = response.json()
+        print(f"Google Books API Data: {data}")
+        if "items" in data and len(data["items"]) > 0:
+            volume_info = data["items"][0]["volumeInfo"]
+            if "imageLinks" in volume_info:
+                thumbnail_url = volume_info["imageLinks"].get("thumbnail")
+                if thumbnail_url:
+                    # 替換 `zoom=1` 為 `zoom=3` 取得較高清封面
+                    high_res_url = thumbnail_url.replace("&zoom=1", "&zoom=3")
+                    print(f"Found High-Res Cover: {high_res_url}")
+                    return high_res_url
+    print("No Google Books cover found.")
+    return None
+
+def get_openlibrary_cover(isbn):
+    """透過 Open Library API 取得封面"""
+    cover_url = f"https://covers.openlibrary.org/b/isbn/{isbn}-L.jpg"
+    print(f"Trying Open Library cover: {cover_url}")
+    return cover_url
+
+def get_best_book_cover(title, isbn):
+    """優先使用 Google Books API，若失敗則使用 Open Library API"""
+    print(f"Searching cover for: {title} (ISBN: {isbn})")
+    cover_url = get_google_books_cover(title)
+    if cover_url:
+        return cover_url
+    if isbn:
+        return get_openlibrary_cover(isbn)
+    print("No cover found from any source.")
+    return None
+
+def update_notion_cover_and_icon(page_id, cover_url):
+    """更新 Notion 頁面的封面與圖示為書籍封面"""
+    print(f"Updating Notion cover and icon for page {page_id} with URL: {cover_url}")
+    if cover_url:
+        notion.pages.update(
+            page_id=page_id,
+            icon={
+                "type": "external",
+                "external": {"url": cover_url}
+            },
+            cover={
+                "type": "external",
+                "external": {"url": cover_url}
+            }
+        )
+        print(f"Updated cover and icon for page {page_id}.")
+    else:
+        print("No cover image found.")
+
+
+def check_notion_icon(page_id):
+    """檢查 Notion 頁面是否已有封面圖示"""
+    page = notion.pages.retrieve(page_id)
+    icon = page.get("icon") or {}  # 確保 icon 為 dict
+    has_icon = isinstance(icon, dict) and icon.get("type") == "external" and "url" in icon.get("external", {})
+    print(f"Page {page_id} has icon: {has_icon}")
+    return has_icon
+
+def add_book_cover_to_notion(title, isbn, page_id):
+    if not check_notion_icon(page_id):
+        cover_url = get_best_book_cover(title, isbn)
+        if cover_url:
+            update_notion_cover_and_icon(page_id, cover_url)
+        else:
+            print("No cover image available.")
+    else:
+        print("Notion page already has a cover icon.")
 
 def export_highlights():
     print("exportHighlights++")
     bookList = DBReader.getBookInfoFromDB()
     print(f"Books Count: {len(bookList)}")
     for book in bookList:
-        print(f"Book Title: {book.get_title()}")
-        print(f"Subtitle: {book.get_subtitle()}")
-        print(f"Author: {book.get_author()}")
-        print(f"Publisher: {book.get_publisher()}")
-        print(f"Description: {book.get_description()}")
-        print(f"ISBN: {book.get_isbn()}")
-        print(f"Percent Read: {book.get_percent_read()}%")
-        print(f"Date Last Read: {book.get_date_last_read()}")
-        print(f"Read Time Spent: {book.get_time_spent_reading()} seconds")
-        print(f"Last Time Finished Reading: {book.get_last_time_finished_reading()}")
-        print("-----------------------------------")
-
+        print(f"Processing Book: {book.get_title()}")
         try:
             title = get_title_without_subtitle(book.get_title())
-            bookStatus = check_target(title, True)
+            bookStatus = check_target(title, True) or {}
             if bookStatus["is_target_valid"]:
                 print("Already Exported. only update reading Time")
                 update_time_related(bookStatus["pageId"], book)
-        
+                add_book_cover_to_notion(book.get_title(), book.get_isbn(), bookStatus["pageId"])
             else:
                 unDoneObj = check_target(title, False)
                 page_id = unDoneObj["pageId"]
-                if (not unDoneObj["is_target_valid"]):
+                if not unDoneObj["is_target_valid"]:
                     print(f"{title} doesn't exist. Try adding an entry for it")
                     valid = add_entry_by_title(title)
                     newObj = check_target(title, False)
                     page_id = newObj["pageId"]
-                else :
-                    print(f"{title} exist. Append HL after original HL")
-
+                else:
+                    print(f"{title} exists. Append HL after original HL")
+                    continue
                 highlights_list = DBReader.getHLFromDB(book.get_id())
                 sync_book_highlights(page_id, highlights_list)
                 update_time_related(page_id, book)
@@ -321,10 +388,9 @@ def export_highlights():
                 update_book_people(page_id, book.get_publisher(), book.get_author())
                 update_book_textinfo(page_id, "Description", book.get_description())
                 update_book_textinfo(page_id, "ISBN", book.get_isbn())
-
+                add_book_cover_to_notion(book.get_title(), book.get_isbn(), page_id)
         except Exception as error:
             print(f"Error with {book.get_title()}: {error}")
-    
 
 
 def main():

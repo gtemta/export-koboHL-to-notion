@@ -4,3 +4,4 @@ node_modules/
 KoboReader.sqlite-wal
 KoboReader.sqlite-shm
 *.log
+*.pyc
