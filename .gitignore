@@ -1,3 +1,8 @@
 node_modules/
 *.env
 *.sqlite
+/__pycache__
+/summaries
+/logs
+/summaries
+/summaries
