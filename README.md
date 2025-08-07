@@ -1,55 +1,55 @@
-<<<<<<< Updated upstream
-# export-kobo-to-notion
+# Kobo to Notion Export Tool
 
-A Node script that exports Kobo highlights to a Notion database. I wrote a detailed writeup of how I wrote this code [on my blog](https://www.juliariec.com/blog/export-kobo-to-notion/).
-=======
-# Kobo to Notion 同步工具
+A Python-based tool that exports Kobo e-reader highlights and notes to a Notion database, with intelligent chapter extraction and organization features.
 
-这是一个将Kobo电子书的高亮内容和笔记同步到Notion的工具。
+## 功能特點
+- ✅ **智能章節標題提取**：從文本內容中自動提取真正的章節標題，而不只是文件名
+- ✅ **多種章節標題模式**：支持冒號模式、數字模式、第X章模式、Chapter模式等
+- ✅ **章節名稱優化**：自動將Section格式轉換為友好的章節名稱（如：第8章、章節13）
+- ✅ **簡潔的markdown語法**：使用單層級標題和列表格式
+- ✅ **美觀排版**：使用章節標題和分隔符美化顯示效果
 
-## 新功能：智能章節標題提取
->>>>>>> Stashed changes
+## 使用方法
 
-### 功能特点
+### 環境要求
 
-<<<<<<< Updated upstream
-You'll need [Git](https://git-scm.com/downloads) and [Node](https://nodejs.org/en/) installed on your computer.
+- Python 3.7+
+- Node.js（用於原始功能）
+- Git（用於版本控制）
 
-You'll also need to configure a Notion "integration" that has access to the database you wish to use (your "library" database). Notion has instructions on how to set up an integration [here](https://developers.notion.com/docs#step-1-create-an-integration), and you can give it access to your library database by sharing the database with the integration.
+您需要配置一個可以訪問您要使用的資料庫（您的「圖書館」資料庫）的 Notion「整合」。Notion 提供了如何設置整合的說明[在此](https://developers.notion.com/docs#step-1-create-an-integration)，您可以透過與整合共享資料庫來讓它訪問您的圖書館資料庫。
 
-## How to use this script
+### 安裝步驟
 
-1. In your terminal, clone this repository by running the following command:
+1. 在您的終端機中，執行以下指令複製此儲存庫：
 
-   ```
+   ```bash
    git clone https://github.com/juliariec/export-kobo-to-notion.git
    ```
 
-1. Navigate inside the folder and run `npm install` to install the necessary modules.
+2. 進入資料夾並執行 `pip install -r requirements.txt` 安裝必要的 Python 套件。
 
-1. Create a file called `.env`. Inside the file, you'll need to set two variables:
+3. 建立一個名為 `.env` 的檔案。在檔案中，您需要設定兩個變數：
 
-   1. `NOTION_TOKEN`, which is the internal integration token associated with your Notion integration. You can find this [here](https://www.notion.so/my-integrations), and it will look like `secret_TY78iopwv` (but longer).
-   2. `NOTION_DATABASE_ID`, which is the ID of the library database. You can find this in the URL of the database page: the URL will have a 32 digit ID located between your workspace name and the ? symbol: it will look like `https://www.notion.so/username/776yv4nanf6qx0bdttznd9upfljupb11?v=s9...`, where the ID is `776yv4nanf6qx0bdttznd9upfljupb11`
+   - `NOTION_TOKEN`：與您的 Notion 整合相關聯的內部整合令牌。您可以在[這裡](https://www.notion.so/my-integrations)找到它，它看起來像 `secret_TY78iopwv`（但更長）。
+   - `NOTION_DATABASE_ID`：圖書館資料庫的 ID。您可以在資料庫頁面的 URL 中找到它：URL 將在您的工作區名稱和 ? 符號之間有一個 32 位數的 ID，它看起來像 `https://www.notion.so/username/776yv4nanf6qx0bdttznd9upfljupb11?v=s9...`，其中 ID 是 `776yv4nanf6qx0bdttznd9upfljupb11`
 
-   So your `.env` file will look like this:
+   所以您的 `.env` 檔案將如下所示：
 
    ```
    NOTION_TOKEN=secret_TY78iopwv
    NOTION_DATABASE_ID=776yv4nanf6qx0bdttznd9upfljupb11
    ```
 
-1. Connect your Kobo to your computer and open it in File Explorer. Navigate into the `.kobo` directory and copy the file called `KoboReader.sqlite`, and then paste it into the `export-kobo-to-notion` folder and rename it `highlights.sqlite`.
+4. 將您的 Kobo 連接到電腦並在檔案總管中開啟它。導航到 `.kobo` 目錄並複製名為 `KoboReader.sqlite` 的檔案，然後將其貼到 `export-kobo-to-notion` 資料夾中。
 
-1. Go to your Notion library database and make sure that the database contains a "Title" property with the name of the book, and a "Highlights" checkbox property which defaults to unchecked. (The script will match books based on the title, and then see if highlights have already been uploaded: if not, it will upload them, and then set the "Highlights" box to checked).
+5. 前往您的 Notion 圖書館資料庫，確保資料庫包含一個帶有書名的「Title」屬性，以及一個預設為未勾選的「Highlights」核取方塊屬性。（腳本將根據標題匹配書籍，然後查看是否已經上傳了摘錄：如果沒有，它將上傳它們，然後將「Highlights」方塊設為已勾選）。
 
-1. Run the script with the command `npm start`, and then check your Notion database to confirm that it worked.
-=======
-- ✅ **智能章節標題提取**：從文本內容中自動提取真正的章節標題，而不只是文件名
-- ✅ **多種章節標題模式**：支持冒號模式、數字模式、第X章模式、Chapter模式等
-- ✅ **章節名稱優化**：自動將Section格式轉換為友好的章節名稱（如：第8章、章節13）
-- ✅ **簡潔的markdown語法**：使用單層級標題和列表格式
-- ✅ **美觀排版**：使用章節標題和分隔符美化顯示效果
+6. 執行腳本：
+   - 使用 Python 版本（推薦）：`python uploadToNotion.py`
+   - 使用 Node.js 版本：`npm start`
+   
+   然後檢查您的 Notion 資料庫以確認它是否有效。
 
 ### 章節信息說明
 
@@ -69,7 +69,7 @@ You'll also need to configure a Notion "integration" that has access to the data
 
 ### 輸出格式
 
-在Notion中，高亮內容將按以下格式顯示：
+在Notion中，畫線內容將按以下格式顯示：
 
 ```
 # Highlights
@@ -259,4 +259,3 @@ book_id!OEBPS!Text/chapter_name.xhtml
 ## 許可證
 
 MIT License
->>>>>>> Stashed changes

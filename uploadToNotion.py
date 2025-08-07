@@ -7,6 +7,7 @@ import requests
 import logging
 from logging.handlers import RotatingFileHandler
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import re
 
 # 设置日志配置
 def setup_logger():
@@ -155,8 +156,31 @@ def update_percentage(page_id, value):
     else:
         print(f"No value provided for PercentageRead, skipping update.")
 
+def clean_html_tags(text):
+    """清理HTML標籤，保留純文本內容"""
+    if not text:
+        return text
+    
+    # 移除HTML標籤
+    clean_text = re.sub(r'<[^>]+>', '', text)
+    
+    # 清理多餘的空白字符
+    clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+    
+    # 處理HTML實體
+    clean_text = clean_text.replace('&amp;', '&')
+    clean_text = clean_text.replace('&lt;', '<')
+    clean_text = clean_text.replace('&gt;', '>')
+    clean_text = clean_text.replace('&quot;', '"')
+    clean_text = clean_text.replace('&#39;', "'")
+    
+    return clean_text
+
 def update_book_textinfo(page_id, text_property_name, text_value):
     if text_value:
+        # 清理HTML標籤
+        clean_text = clean_html_tags(text_value)
+        
         notion.pages.update(
             page_id=page_id,
             properties={
@@ -164,7 +188,7 @@ def update_book_textinfo(page_id, text_property_name, text_value):
                     "rich_text": [
                     {
                         "text": {
-                                "content": text_value
+                                "content": clean_text
                         }
                     }
                     ]
