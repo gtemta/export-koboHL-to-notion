@@ -8,11 +8,18 @@ import logging
 from logging.handlers import RotatingFileHandler
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
+import time
+from notion_client.errors import APIResponseError
 
 # 设置日志配置
 def setup_logger():
     logger = logging.getLogger('kobo_notion_sync')
-    logger.setLevel(logging.DEBUG)
+    
+    # 避免重複添加handler
+    if logger.handlers:
+        return logger
+        
+    logger.setLevel(logging.INFO)  # 調整為INFO級別，減少冗餘日誌
     
     # 创建日志目录
     log_dir = 'logs'
@@ -21,17 +28,22 @@ def setup_logger():
     
     # 设置日志文件，指定 UTF-8 编码
     log_file = os.path.join(log_dir, 'kobo_notion_sync.log')
-    file_handler = RotatingFileHandler(log_file, maxBytes=1024*1024, backupCount=5, encoding='utf-8')
+    file_handler = RotatingFileHandler(log_file, maxBytes=2*1024*1024, backupCount=3, encoding='utf-8')
     file_handler.setLevel(logging.DEBUG)
     
-    # 设置控制台输出，指定 UTF-8 编码
+    # 设置控制台输出，指定 UTF-8 编码  
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.INFO)
     
-    # 设置日志格式
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    # 设置详细的日志格式，包含函數名稱
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'
+    )
     file_handler.setFormatter(formatter)
-    console_handler.setFormatter(formatter)
+    
+    # 控制台使用簡化格式
+    console_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    console_handler.setFormatter(console_formatter)
     
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
@@ -310,11 +322,12 @@ def sync_book_highlights(page_id, highlights_list):
                 },
             })
 
-        if len(blocks) > 90:
-            # print(f"Over {len(blocks)} append children first")
+        # 調整批次大小以符合Notion API限制，更保守的設置
+        if len(blocks) > 80:  # 更保守的批次大小，避免超過API限制
+            logger.info(f"達到批次限制 {len(blocks)}，先上傳這批blocks")
             append_blocks_to_page(page_id, blocks)
             blocks.clear()
-            # print(f"Clear Block to {len(blocks)}")
+            logger.info(f"清除blocks列表，目前大小: {len(blocks)}")
 
     append_blocks_to_page(page_id, blocks)
 
@@ -382,7 +395,9 @@ def sync_book_highlights_with_chapter(page_id, highlights_with_chapter):
             "divider": {},
         })
 
-        if len(blocks) > 90:
+        # 調整批次大小以符合Notion API限制，更保守的設置
+        if len(blocks) > 80:  # 更保守的批次大小，避免超過API限制
+            logger.info(f"達到批次限制 {len(blocks)}，先上傳這批blocks")
             append_blocks_to_page(page_id, blocks)
             blocks.clear()
 
@@ -420,10 +435,63 @@ def add_entry_by_title(book_title):
         return False
 
 def append_blocks_to_page(page_id, blocks):
-    notion.blocks.children.append(
-        block_id=page_id,
-        children=blocks,
-    )
+    """安全地批次添加blocks到Notion頁面，遵守API限制並支持重試機制"""
+    if not blocks:
+        return
+    
+    # Notion API限制：每次最多100個blocks
+    MAX_BLOCKS_PER_REQUEST = 100
+    MAX_RETRIES = 3
+    RETRY_DELAY = 1  # 秒
+    
+    try:
+        for i in range(0, len(blocks), MAX_BLOCKS_PER_REQUEST):
+            batch = blocks[i:i + MAX_BLOCKS_PER_REQUEST]
+            batch_num = i//MAX_BLOCKS_PER_REQUEST + 1
+            
+            logger.info(f"上傳第 {batch_num} 批，包含 {len(batch)} 個blocks")
+            
+            # 重試機制
+            for attempt in range(MAX_RETRIES):
+                try:
+                    notion.blocks.children.append(
+                        block_id=page_id,
+                        children=batch,
+                    )
+                    logger.info(f"成功上傳第 {batch_num} 批 ({len(batch)} 個blocks)")
+                    break
+                    
+                except APIResponseError as e:
+                    if "should be ≤" in str(e) and "instead was" in str(e):
+                        # 批次大小錯誤，進一步拆分
+                        logger.warning(f"批次大小 {len(batch)} 仍然太大，嘗試拆分為更小批次")
+                        smaller_batch_size = min(50, len(batch) // 2)
+                        for j in range(0, len(batch), smaller_batch_size):
+                            small_batch = batch[j:j + smaller_batch_size]
+                            logger.info(f"上傳小批次: {len(small_batch)} 個blocks")
+                            notion.blocks.children.append(
+                                block_id=page_id,
+                                children=small_batch,
+                            )
+                        break
+                    else:
+                        logger.warning(f"第 {attempt + 1} 次嘗試失敗: {str(e)}")
+                        if attempt < MAX_RETRIES - 1:
+                            time.sleep(RETRY_DELAY)
+                        else:
+                            raise
+                except Exception as e:
+                    logger.warning(f"第 {attempt + 1} 次嘗試出現未預期錯誤: {str(e)}")
+                    if attempt < MAX_RETRIES - 1:
+                        time.sleep(RETRY_DELAY)
+                    else:
+                        raise
+            
+    except Exception as e:
+        logger.error(f"上傳blocks時發生錯誤: {str(e)}")
+        logger.error(f"嘗試上傳的總blocks數量: {len(blocks)}")
+        logger.error(f"失敗的頁面ID: {page_id}")
+        raise
 
 def get_google_books_cover(title):
     """透過 Google Books API 查詢書籍封面（高解析度）"""
