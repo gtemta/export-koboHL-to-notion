@@ -238,15 +238,25 @@ def extract_chapter_name(content_id):
         return "未知章节"
 
 def extract_real_chapter_title(text, content_id):
-    """从文本内容中提取真正的章节标题"""
+    """从文本内容中提取真正的章节标题，增強驗證邏輯"""
     try:
-        if not text or len(text.strip()) > 200:
+        if not text or len(text.strip()) > 100:  # 降低長度限制從200到100
             return None
         
         text_clean = text.strip()
         
+        # 基本長度檢查
+        if len(text_clean) > 100:
+            return None
+        
+        # 檢查標點符號密度 - 避免普通高亮被誤認為標題
+        punctuation_ratio = sum(1 for c in text_clean if c in '。！？；：，、') / len(text_clean) if text_clean else 0
+        if punctuation_ratio > 0.3:  # 超過30%是標點符號，可能不是標題
+            return None
+            
         # 檢查是否像章節標題
         is_chapter_title = False
+        has_chapter_keywords = False
         
         # 模式1：包含"："的短文本
         if '：' in text_clean and len(text_clean) < 50:
@@ -263,18 +273,29 @@ def extract_real_chapter_title(text, content_id):
         # 模式4：包含"第X章"
         elif re.search(r'第[一二三四五六七八九十\d]+章', text_clean):
             is_chapter_title = True
+            has_chapter_keywords = True
         
         # 模式5：包含"Chapter"
         elif re.search(r'Chapter\s*\d+', text_clean, re.IGNORECASE):
             is_chapter_title = True
+            has_chapter_keywords = True
         
         # 模式6：特定關鍵詞
         elif any(keyword in text_clean for keyword in ['序', '前言', '導讀', '引言', '結語', '後記']):
             is_chapter_title = True
+            has_chapter_keywords = True
         
         # 模式7：短文本且包含特定結構
         elif len(text_clean) < 30 and ('：' in text_clean or ':' in text_clean):
             is_chapter_title = True
+            
+        # 額外驗證：如果文本較長但沒有明確章節關鍵詞，可能不是標題
+        if is_chapter_title and len(text_clean) > 50 and not has_chapter_keywords:
+            return None
+            
+        # 檢查是否是完整句子（章節標題通常不是完整句子）
+        if is_chapter_title and text_clean.endswith(('。', '！', '？', '.')) and len(text_clean) > 30:
+            return None
         
         if is_chapter_title:
             return text_clean
@@ -319,4 +340,130 @@ def get_chapter_name_from_content_table(book_id):
     except Exception as e:
         print(f"从content表获取章节信息时出错: {e}")
         return None
+
+def extract_chapter_order_info(content_id):
+    """從ContentID中提取章節順序信息"""
+    try:
+        # 提取各種章節編號格式
+        patterns = [
+            # Section格式: Section0001, Section0012 等
+            (r'Section(\d+)', lambda m: int(m.group(1))),
+            
+            # 數字格式: 01.xhtml, 12.xhtml 等  
+            (r'/(\d+)\.xhtml', lambda m: int(m.group(1))),
+            
+            # Chapter格式: chapter01, chapter12 等
+            (r'chapter(\d+)', lambda m: int(m.group(1)), re.IGNORECASE),
+            
+            # Part格式: part1, part2 等
+            (r'part(\d+)', lambda m: int(m.group(1)), re.IGNORECASE),
+            
+            # 中文格式: 第1章, 第12章 等 (如果出現在路徑中)
+            (r'第(\d+)章', lambda m: int(m.group(1))),
+        ]
+        
+        for pattern, extractor, *flags in patterns:
+            flag = flags[0] if flags else 0
+            match = re.search(pattern, content_id, flag)
+            if match:
+                order_num = extractor(match)
+                identifier = match.group(0)
+                return order_num, identifier
+        
+        # 如果沒有找到數字，嘗試其他識別符
+        special_orders = {
+            'prologue': 0,      # 序言
+            'preface': 1,       # 前言  
+            'introduction': 2,  # 引言
+            'epilogue': 9999,   # 尾聲
+            'appendix': 10000,  # 附錄
+            'bibliography': 10001,  # 參考文獻
+        }
+        
+        content_lower = content_id.lower()
+        for keyword, order in special_orders.items():
+            if keyword in content_lower:
+                return order, keyword
+                
+        # 默認使用一個很大的數字，讓未識別的章節排在後面
+        return 99999, "unknown"
+        
+    except Exception as e:
+        print(f"提取章節順序信息時出錯: {e}")
+        return 99999, "error"
+
+def smart_sort_highlights_by_chapter(highlights_with_chapter):
+    """智能排序高亮內容，按章節正確順序排列"""
+    if not highlights_with_chapter:
+        return []
+    
+    # 按章節分組
+    chapter_groups = {}
+    for highlight_info in highlights_with_chapter:
+        chapter_name = highlight_info.get('chapter_name', '未知章节')
+        if chapter_name not in chapter_groups:
+            chapter_groups[chapter_name] = []
+        chapter_groups[chapter_name].append(highlight_info)
+    
+    print(f"開始智能章節排序，總共 {len(chapter_groups)} 個章節")
+    
+    chapter_info = []
+    
+    for chapter_name, highlights in chapter_groups.items():
+        if not highlights:
+            continue
+            
+        # 獲取本章節的所有ContentID，嘗試提取順序信息
+        content_ids = [h.get('content_id', '') for h in highlights if h.get('content_id')]
+        
+        # 嘗試從所有ContentID中找到最佳的順序信息
+        best_order = 99999
+        best_identifier = "unknown"
+        
+        for content_id in content_ids:
+            order, identifier = extract_chapter_order_info(content_id)
+            if order < best_order:
+                best_order = order
+                best_identifier = identifier
+        
+        # 獲取進度信息作為輔助排序依據
+        progresses = [h.get('chapter_progress', 0) for h in highlights if h.get('chapter_progress')]
+        min_progress = min(progresses) if progresses else 0
+        
+        chapter_info.append({
+            'name': chapter_name,
+            'highlights': highlights,
+            'order_number': best_order,
+            'order_identifier': best_identifier,
+            'min_progress': min_progress,
+            'highlight_count': len(highlights)
+        })
+        
+        print(f"章節 '{chapter_name[:30]}': 順序={best_order}({best_identifier}), "
+              f"最小進度={min_progress:.3f}, 高亮數={len(highlights)}")
+    
+    # 多重排序標準
+    sorted_chapters = sorted(chapter_info, key=lambda x: (
+        x['order_number'],           # 主要排序：章節順序號
+        x['min_progress'],           # 輔助排序：最小進度 
+        x['name']                    # 最終排序：章節名稱
+    ))
+    
+    # 輸出排序結果
+    print("=== 章節排序結果 ===")
+    for i, chapter in enumerate(sorted_chapters):
+        print(f"{i+1:2d}. {chapter['name'][:40]:40} "
+              f"(順序:{chapter['order_number']:3d}, "
+              f"進度:{chapter['min_progress']:.3f}, "
+              f"高亮:{chapter['highlight_count']:2d})")
+    
+    # 展開為按順序排列的高亮列表
+    sorted_highlights = []
+    for chapter in sorted_chapters:
+        # 在每個章節內，按chapter_progress排序高亮內容
+        chapter_highlights = sorted(chapter['highlights'], 
+                                   key=lambda x: x.get('chapter_progress', 0))
+        sorted_highlights.extend(chapter_highlights)
+    
+    return sorted_highlights
     

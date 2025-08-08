@@ -338,7 +338,7 @@ def sync_book_highlights(page_id, highlights_list):
 
 # 新增：处理带章节信息的高亮内容
 def sync_book_highlights_with_chapter(page_id, highlights_with_chapter):
-    """同步带章节信息的高亮内容到Notion，使用簡潔的markdown語法格式"""
+    """同步带章节信息的高亮内容到Notion，使用智能排序和改進的標題驗證"""
     blocks = []
 
     blocks.append({
@@ -348,29 +348,57 @@ def sync_book_highlights_with_chapter(page_id, highlights_with_chapter):
             "rich_text": [{"type": "text", "text": {"content": "Highlights"}}],
         },
     })
-    print("Append Title")
-    print(len(highlights_with_chapter))
+    logger.info(f"開始同步書籍高亮，總共 {len(highlights_with_chapter)} 個高亮")
 
-    # 按章节分组高亮内容
+    # 使用智能排序獲取正確的章節順序
+    sorted_highlights = DBReader.smart_sort_highlights_by_chapter(highlights_with_chapter)
+    
+    # 重新按章節分組（現在已經是正確順序）
     chapter_groups = {}
-    for highlight_info in highlights_with_chapter:
+    chapter_order = {}
+    order_counter = 0
+    
+    for highlight_info in sorted_highlights:
         chapter_name = highlight_info['chapter_name']
         if chapter_name not in chapter_groups:
             chapter_groups[chapter_name] = []
+            chapter_order[chapter_name] = order_counter
+            order_counter += 1
         chapter_groups[chapter_name].append(highlight_info)
 
-    # 按章节进度排序（階層式排列）
-    sorted_chapters = sorted(chapter_groups.items(), key=lambda x: 
-        max([h['chapter_progress'] for h in x[1]]) if x[1] else 0)
+    # 按預定順序排序章節
+    sorted_chapters = sorted(chapter_groups.items(), key=lambda x: chapter_order[x[0]])
 
-    # 按章节顺序处理高亮内容
+    # 按章節順序處理高亮內容
     for chapter_name, highlights in sorted_chapters:
-        # 添加章节标题（使用單層級標題，不顯示進度）
+        # 清理和驗證章節標題
+        display_chapter_name = chapter_name
+        
+        # 避免顯示"未知章節"
+        if chapter_name == "未知章節" or chapter_name == "未知章节":
+            # 嘗試從第一個高亮的ContentID提取更好的章節名稱
+            if highlights:
+                first_highlight = highlights[0]
+                content_id = first_highlight.get('content_id', '')
+                if content_id:
+                    fallback_chapter = DBReader.extract_chapter_name(content_id)
+                    if fallback_chapter != "未知章节":
+                        display_chapter_name = fallback_chapter
+                    else:
+                        display_chapter_name = "其他內容"
+        
+        # 限制標題長度，避免過長
+        if len(display_chapter_name) > 50:
+            display_chapter_name = display_chapter_name[:47] + "..."
+        
+        logger.info(f"處理章節: {display_chapter_name} ({len(highlights)} 個高亮)")
+        
+        # 添加章节标题（使用單層級標題）
         blocks.append({
             "object": "block",
             "type": "heading_1",
             "heading_1": {
-                "rich_text": [{"type": "text", "text": {"content": f"📖 {chapter_name}"}}],
+                "rich_text": [{"type": "text", "text": {"content": f"📖 {display_chapter_name}"}}],
             },
         })
 
