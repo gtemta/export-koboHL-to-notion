@@ -1,7 +1,8 @@
 node_modules/
 *.env
 *.sqlite
-KoboReader.sqlite-wal
-KoboReader.sqlite-shm
-*.log
+__pycache__/
 *.pyc
+summaries/
+logs/
+.claude/
