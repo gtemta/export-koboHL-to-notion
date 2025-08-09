@@ -6,8 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Python Environment (Primary Implementation)
 - **Main sync command**: `python3 uploadToNotion.py`
+- **Enhanced book summary**: `python3 enhanced_summarize_with_review.py`
+- **LLM status checker**: `python3 llm_status_checker.py`
 - **Test chapter extraction**: `python3 test_chapter_extraction.py`
 - **Test LLM integration**: `python3 test_llm_integration.py`
+- **Test enhanced summary**: `python3 test_enhanced_summary_integration.py`
 - **Demo hierarchical output**: `python3 demo_hierarchical_output.py`
 - **Demo simple markdown**: `python3 demo_simple_markdown_output.py`
 - **Test different books**: `python3 test_different_book.py`
@@ -36,7 +39,13 @@ This is a dual-language tool for exporting Kobo e-reader highlights to Notion da
    - `export_highlights()`: Main orchestration with thread pool execution
    - Book cover fetching from Google Books API and Open Library
 
-3. **index.js**: Legacy Node.js implementation (simpler, no chapter extraction)
+3. **enhanced_summarize_with_review.py**: Optional LLM-enhanced book summary system
+   - Environment-driven LLM integration (Gemma local + OpenAI review)
+   - Generates 16-point structured summaries with 【標題】format
+   - Graceful fallback when LLM services unavailable
+   - Multi-mode operation: Gemma-only, OpenAI-only, or dual-model
+
+4. **index.js**: Legacy Node.js implementation (simpler, no chapter extraction)
 
 ### Data Flow Architecture
 
@@ -60,11 +69,22 @@ The system uses a sophisticated multi-tier approach:
 
 ### Configuration Requirements
 
+#### Core Configuration
 - **.env file** with:
   - `NOTION_TOKEN`: Notion integration token
   - `NOTION_DATABASE_ID`: Target database identifier
 - **KoboReader.sqlite**: Must be copied from Kobo device to project root
 - **Notion database** must have: Title (text), Exported (checkbox), plus optional fields for metadata
+
+#### Optional LLM Enhancement (Environment Variables)
+- **Gemma Local Model** (Recommended):
+  - `GEMMA_API_URL`: Ollama API endpoint (default: http://localhost:11434/api/generate)
+  - `GEMMA_MODEL`: Model name (default: gemma:7b)
+- **OpenAI API** (Optional):
+  - `OPENAI_API_KEY`: Your OpenAI API key
+  - `OPENAI_MODEL`: Model name (default: gpt-4)
+- **Summary Configuration**:
+  - `SUMMARY_POINTS`: Number of summary points (default: 16)
 
 ### Key Database Schema Understanding
 
