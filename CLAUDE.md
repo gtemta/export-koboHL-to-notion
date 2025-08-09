@@ -7,6 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### Python Environment (Primary Implementation)
 - **Main sync command**: `python3 uploadToNotion.py`
 - **Test chapter extraction**: `python3 test_chapter_extraction.py`
+- **Test LLM integration**: `python3 test_llm_integration.py`
 - **Demo hierarchical output**: `python3 demo_hierarchical_output.py`
 - **Demo simple markdown**: `python3 demo_simple_markdown_output.py`
 - **Test different books**: `python3 test_different_book.py`
