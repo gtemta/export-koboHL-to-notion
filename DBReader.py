@@ -238,66 +238,131 @@ def extract_chapter_name(content_id):
         return "未知章节"
 
 def extract_real_chapter_title(text, content_id):
-    """从文本内容中提取真正的章节标题，增強驗證邏輯"""
+    """从文本内容中提取真正的章节标题，增強驗證邏輯和真實標題識別"""
     try:
-        if not text or len(text.strip()) > 100:  # 降低長度限制從200到100
+        if not text or len(text.strip()) > 150:  # 稍微放寬長度限制，真實標題可能較長
             return None
         
         text_clean = text.strip()
         
         # 基本長度檢查
-        if len(text_clean) > 100:
+        if len(text_clean) > 150:
             return None
         
-        # 檢查標點符號密度 - 避免普通高亮被誤認為標題
-        punctuation_ratio = sum(1 for c in text_clean if c in '。！？；：，、') / len(text_clean) if text_clean else 0
-        if punctuation_ratio > 0.3:  # 超過30%是標點符號，可能不是標題
+        # 檢查標點符號密度 - 但對冒號更寬容
+        punctuation_ratio = sum(1 for c in text_clean if c in '。！？；，、') / len(text_clean) if text_clean else 0
+        if punctuation_ratio > 0.4:  # 提高容忍度
             return None
             
         # 檢查是否像章節標題
         is_chapter_title = False
         has_chapter_keywords = False
+        confidence_score = 0
         
-        # 模式1：包含"："的短文本
-        if '：' in text_clean and len(text_clean) < 50:
+        # 模式1：包含"："或"："的文本（高置信度）
+        if '：' in text_clean or ':' in text_clean:
             is_chapter_title = True
+            confidence_score += 3
+            
+            # 特別檢查是否為國家/地區相關標題（從分析中發現的模式）
+            if any(keyword in text_clean for keyword in ['美國', '中國', '日本', '台灣', '韓國', '強項', '優勢', '特色']):
+                confidence_score += 2
+                has_chapter_keywords = True
         
         # 模式2：數字開頭
         elif re.match(r'^\d+\.', text_clean):
             is_chapter_title = True
+            confidence_score += 2
         
         # 模式3：中文數字開頭
         elif re.match(r'^[一二三四五六七八九十]+\.', text_clean):
             is_chapter_title = True
+            confidence_score += 2
         
         # 模式4：包含"第X章"
         elif re.search(r'第[一二三四五六七八九十\d]+章', text_clean):
             is_chapter_title = True
             has_chapter_keywords = True
+            confidence_score += 4
         
         # 模式5：包含"Chapter"
         elif re.search(r'Chapter\s*\d+', text_clean, re.IGNORECASE):
             is_chapter_title = True
             has_chapter_keywords = True
+            confidence_score += 4
         
         # 模式6：特定關鍵詞
-        elif any(keyword in text_clean for keyword in ['序', '前言', '導讀', '引言', '結語', '後記']):
+        elif any(keyword in text_clean for keyword in ['序', '前言', '導讀', '引言', '結語', '後記', '附錄', '目錄']):
             is_chapter_title = True
             has_chapter_keywords = True
-        
-        # 模式7：短文本且包含特定結構
-        elif len(text_clean) < 30 and ('：' in text_clean or ':' in text_clean):
+            confidence_score += 3
+            
+        # 模式7：入口X格式（從主控力書籍發現）
+        elif re.search(r'入口\s*[０-９\d]+\s*[：:]', text_clean):
             is_chapter_title = True
+            has_chapter_keywords = True
+            confidence_score += 4
             
-        # 額外驗證：如果文本較長但沒有明確章節關鍵詞，可能不是標題
-        if is_chapter_title and len(text_clean) > 50 and not has_chapter_keywords:
+        # 模式8：對抗/防護等動作類標題
+        elif re.search(r'^[對抗|防護|掌握|學會|了解|認識|建立].+[：:]', text_clean):
+            is_chapter_title = True
+            confidence_score += 2
+            
+        # 模式9：短文本且結構化
+        elif len(text_clean) < 40 and ('：' in text_clean or ':' in text_clean):
+            is_chapter_title = True
+            confidence_score += 1
+            
+        # 模式10：純粹的動名詞短語（可能是章節名）
+        elif (len(text_clean) < 30 and 
+              not text_clean.endswith(('。', '！', '？', '.', '，', '；')) and
+              len([c for c in text_clean if c.isalnum()]) / len(text_clean) > 0.7):
+            is_chapter_title = True
+            confidence_score += 1
+            
+        # 模式11：概念定義型標題（新增）
+        elif re.match(r'^「.+」', text_clean):
+            # 引號內的概念，如「反向思考」、「心智模式」
+            if len(text_clean) < 60:
+                is_chapter_title = True
+                confidence_score += 3
+                has_chapter_keywords = True
+                
+        # 模式12：帶英文翻譯的概念（新增）
+        elif re.search(r'^「.+?」\s*[（(].+?[）)]', text_clean):
+            # 如「反向思考」（inverse thinking）
+            # 提取引號和括號部分作為標題
+            match = re.match(r'^(「.+?」\s*[（(].+?[）)])', text_clean)
+            if match and len(match.group(1)) < 80:
+                extracted_title = match.group(1)
+                is_chapter_title = True
+                confidence_score += 5
+                has_chapter_keywords = True
+                # 直接返回提取的部分而不是整個文本
+                if confidence_score >= 2:
+                    return extracted_title
+                
+        # 模式13：學術/專業概念（新增）
+        elif re.search(r'^[「"](.{2,20})[」"]', text_clean):
+            # 引號內的短概念
+            if len(text_clean) < 50:
+                is_chapter_title = True
+                confidence_score += 2
+                has_chapter_keywords = True
+            
+        # 額外驗證：如果文本較長但置信度不高，可能不是標題
+        if is_chapter_title and len(text_clean) > 80 and confidence_score < 3:
             return None
             
-        # 檢查是否是完整句子（章節標題通常不是完整句子）
-        if is_chapter_title and text_clean.endswith(('。', '！', '？', '.')) and len(text_clean) > 30:
+        # 檢查是否是完整句子（但允許部分例外）
+        if (is_chapter_title and 
+            text_clean.endswith(('。', '！', '？')) and 
+            len(text_clean) > 50 and
+            confidence_score < 3):
             return None
         
-        if is_chapter_title:
+        # 需要足夠的置信度
+        if is_chapter_title and confidence_score >= 2:
             return text_clean
         
         return None
@@ -392,78 +457,207 @@ def extract_chapter_order_info(content_id):
         print(f"提取章節順序信息時出錯: {e}")
         return 99999, "error"
 
-def smart_sort_highlights_by_chapter(highlights_with_chapter):
-    """智能排序高亮內容，按章節正確順序排列"""
+def create_progress_based_chapters_with_real_titles(highlights_with_chapter, num_chapters=None):
+    """基於畫線進度分佈自動建立章節區間，並嘗試使用真實章節標題"""
     if not highlights_with_chapter:
         return []
     
-    # 按章節分組
-    chapter_groups = {}
+    # 提取所有有效的進度值並排序
+    all_progresses = []
+    real_chapter_titles = {}  # 存儲發現的真實章節標題
+    
     for highlight_info in highlights_with_chapter:
-        chapter_name = highlight_info.get('chapter_name', '未知章节')
-        if chapter_name not in chapter_groups:
-            chapter_groups[chapter_name] = []
-        chapter_groups[chapter_name].append(highlight_info)
-    
-    print(f"開始智能章節排序，總共 {len(chapter_groups)} 個章節")
-    
-    chapter_info = []
-    
-    for chapter_name, highlights in chapter_groups.items():
-        if not highlights:
-            continue
+        progress = highlight_info.get('chapter_progress', 0)
+        if progress is not None and progress > 0:
+            all_progresses.append((progress, highlight_info))
             
-        # 獲取本章節的所有ContentID，嘗試提取順序信息
-        content_ids = [h.get('content_id', '') for h in highlights if h.get('content_id')]
-        
-        # 嘗試從所有ContentID中找到最佳的順序信息
-        best_order = 99999
-        best_identifier = "unknown"
-        
-        for content_id in content_ids:
-            order, identifier = extract_chapter_order_info(content_id)
-            if order < best_order:
-                best_order = order
-                best_identifier = identifier
-        
-        # 獲取進度信息作為輔助排序依據
-        progresses = [h.get('chapter_progress', 0) for h in highlights if h.get('chapter_progress')]
-        min_progress = min(progresses) if progresses else 0
-        
-        chapter_info.append({
-            'name': chapter_name,
-            'highlights': highlights,
-            'order_number': best_order,
-            'order_identifier': best_identifier,
-            'min_progress': min_progress,
-            'highlight_count': len(highlights)
-        })
-        
-        print(f"章節 '{chapter_name[:30]}': 順序={best_order}({best_identifier}), "
-              f"最小進度={min_progress:.3f}, 高亮數={len(highlights)}")
+            # 檢查是否包含真實章節標題
+            text = highlight_info.get('text', '')
+            real_title = extract_real_chapter_title(text, highlight_info.get('content_id', ''))
+            if real_title:
+                real_chapter_titles[progress] = real_title
     
-    # 多重排序標準
-    sorted_chapters = sorted(chapter_info, key=lambda x: (
-        x['order_number'],           # 主要排序：章節順序號
-        x['min_progress'],           # 輔助排序：最小進度 
-        x['name']                    # 最終排序：章節名稱
+    # 按進度排序
+    all_progresses.sort(key=lambda x: x[0])
+    
+    print(f"總共 {len(all_progresses)} 個有效畫線，進度範圍：{all_progresses[0][0]:.3f} - {all_progresses[-1][0]:.3f}")
+    print(f"發現 {len(real_chapter_titles)} 個可能的真實章節標題")
+    
+    # 如果沒有指定章節數，使用自適應方法
+    if num_chapters is None:
+        # 基於畫線密度和真實標題數量決定章節數
+        estimated_chapters = min(20, max(3, len(all_progresses) // 2))
+        # 如果有真實標題，考慮使用接近的章節數
+        if real_chapter_titles:
+            title_based_estimate = min(15, max(len(real_chapter_titles), len(real_chapter_titles) * 2))
+            estimated_chapters = min(estimated_chapters, title_based_estimate)
+        num_chapters = estimated_chapters
+    
+    print(f"自動劃分為 {num_chapters} 個章節")
+    
+    # 計算章節分界點
+    total_highlights = len(all_progresses)
+    highlights_per_chapter = total_highlights / num_chapters
+    
+    chapter_highlights = []
+    current_chapter = []
+    
+    for i, (progress, highlight_info) in enumerate(all_progresses):
+        current_chapter.append(highlight_info)
+        
+        # 檢查是否應該結束當前章節
+        should_end_chapter = False
+        
+        if len(chapter_highlights) < num_chapters - 1:  # 不是最後一章
+            expected_end = (len(chapter_highlights) + 1) * highlights_per_chapter
+            
+            # 如果達到預期大小，或下一個畫線進度跨度較大，則結束章節
+            if i + 1 >= expected_end:
+                if i + 1 < total_highlights:
+                    next_progress = all_progresses[i + 1][0]
+                    progress_gap = next_progress - progress
+                    # 如果進度跨度大於0.05（5%）或發現真實標題分界，則認為是章節分界
+                    if (progress_gap > 0.05 or 
+                        len(current_chapter) >= highlights_per_chapter * 1.5 or
+                        next_progress in real_chapter_titles):
+                        should_end_chapter = True
+                else:
+                    should_end_chapter = True
+        
+        if should_end_chapter or i == total_highlights - 1:  # 最後一個畫線
+            if current_chapter:
+                chapter_highlights.append(current_chapter)
+                current_chapter = []
+    
+    # 為每個章節分配名稱和編號，優先使用真實標題
+    reorganized_highlights = []
+    
+    print("=== 基於進度分佈和真實標題的章節劃分結果 ===")
+    
+    for i, chapter_highlights_list in enumerate(chapter_highlights):
+        chapter_num = i + 1
+        
+        # 計算章節統計信息
+        progresses = [h.get('chapter_progress', 0) for h in chapter_highlights_list]
+        valid_progresses = [p for p in progresses if p > 0]
+        
+        if valid_progresses:
+            min_progress = min(valid_progresses)
+            max_progress = max(valid_progresses)
+            avg_progress = sum(valid_progresses) / len(valid_progresses)
+        else:
+            min_progress = max_progress = avg_progress = 0
+        
+        # 尋找這個章節範圍內的真實標題
+        chapter_title = None
+        best_title_score = 0
+        
+        for progress in valid_progresses:
+            if progress in real_chapter_titles:
+                title = real_chapter_titles[progress]
+                # 計算標題的置信度分數
+                score = calculate_title_confidence(title)
+                if score > best_title_score:
+                    best_title_score = score
+                    chapter_title = title
+        
+        # 如果沒有找到真實標題，使用默認名稱
+        if not chapter_title:
+            chapter_title = f"第{chapter_num}章"
+        else:
+            # 限制標題長度，避免過長
+            if len(chapter_title) > 60:
+                chapter_title = chapter_title[:57] + "..."
+        
+        print(f"第{chapter_num:2d}章: 進度範圍 {min_progress:.3f}-{max_progress:.3f}, "
+              f"平均 {avg_progress:.3f}, {len(chapter_highlights_list)} 個高亮")
+        print(f"         標題: {chapter_title}")
+        
+        # 更新章節信息
+        for highlight_info in chapter_highlights_list:
+            highlight_info['chapter_name'] = chapter_title
+            highlight_info['chapter_number'] = chapter_num
+            highlight_info['chapter_min_progress'] = min_progress
+            highlight_info['chapter_max_progress'] = max_progress
+            highlight_info['chapter_avg_progress'] = avg_progress
+            highlight_info['has_real_title'] = chapter_title != f"第{chapter_num}章"
+        
+        reorganized_highlights.extend(chapter_highlights_list)
+    
+    return reorganized_highlights
+
+def calculate_title_confidence(title):
+    """計算章節標題的置信度分數"""
+    if not title:
+        return 0
+    
+    score = 0
+    
+    # 長度合理
+    if 5 <= len(title) <= 50:
+        score += 2
+    elif 3 <= len(title) <= 80:
+        score += 1
+    
+    # 包含冒號
+    if '：' in title or ':' in title:
+        score += 3
+    
+    # 包含章節關鍵詞
+    chapter_keywords = ['第', '章', 'Chapter', '序', '前言', '引言', '結語', '入口', '步驟']
+    if any(kw in title for kw in chapter_keywords):
+        score += 2
+    
+    # 包含動作詞
+    action_keywords = ['對抗', '掌握', '學會', '了解', '認識', '建立', '防護']
+    if any(kw in title for kw in action_keywords):
+        score += 1
+    
+    # 不是完整句子
+    if not title.endswith(('。', '！', '？')):
+        score += 1
+    
+    return score
+
+def smart_sort_highlights_by_chapter(highlights_with_chapter):
+    """智能排序高亮內容：基於畫線進度重新劃分章節，並使用真實章節標題"""
+    if not highlights_with_chapter:
+        return []
+    
+    print(f"開始基於進度的智能章節重組（含真實標題提取），原始高亮數：{len(highlights_with_chapter)}")
+    
+    # 第一步：基於進度分佈重新劃分章節，並提取真實標題
+    reorganized_highlights = create_progress_based_chapters_with_real_titles(highlights_with_chapter)
+    
+    # 第二步：按章節編號和進度排序
+    sorted_highlights = sorted(reorganized_highlights, key=lambda x: (
+        x.get('chapter_number', 999),     # 主要排序：章節編號
+        x.get('chapter_progress', 0),     # 次要排序：章節內進度
     ))
     
-    # 輸出排序結果
-    print("=== 章節排序結果 ===")
-    for i, chapter in enumerate(sorted_chapters):
-        print(f"{i+1:2d}. {chapter['name'][:40]:40} "
-              f"(順序:{chapter['order_number']:3d}, "
-              f"進度:{chapter['min_progress']:.3f}, "
-              f"高亮:{chapter['highlight_count']:2d})")
+    print(f"\n=== 重組後的章節順序驗證（含真實標題）===")
+    current_chapter = 0
+    chapter_count = 0
+    real_title_count = 0
     
-    # 展開為按順序排列的高亮列表
-    sorted_highlights = []
-    for chapter in sorted_chapters:
-        # 在每個章節內，按chapter_progress排序高亮內容
-        chapter_highlights = sorted(chapter['highlights'], 
-                                   key=lambda x: x.get('chapter_progress', 0))
-        sorted_highlights.extend(chapter_highlights)
+    for highlight in sorted_highlights:
+        chapter_num = highlight.get('chapter_number', 0)
+        if chapter_num != current_chapter:
+            current_chapter = chapter_num
+            chapter_count += 1
+            chapter_name = highlight.get('chapter_name', f'第{chapter_num}章')
+            min_prog = highlight.get('chapter_min_progress', 0)
+            max_prog = highlight.get('chapter_max_progress', 0)
+            has_real_title = highlight.get('has_real_title', False)
+            
+            status = "📖" if has_real_title else "📄"
+            print(f"  {status} {chapter_name}: {min_prog:.3f} - {max_prog:.3f}")
+            
+            if has_real_title:
+                real_title_count += 1
+    
+    print(f"✅ 重組完成：{chapter_count} 個章節，{len(sorted_highlights)} 個高亮")
+    print(f"📖 真實標題：{real_title_count} 個，📄 默認標題：{chapter_count - real_title_count} 個")
     
     return sorted_highlights
     

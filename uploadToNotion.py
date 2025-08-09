@@ -66,6 +66,23 @@ NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 notion = Client(auth=NOTION_TOKEN)
 database = notion.databases.retrieve(NOTION_DATABASE_ID)
 
+def retry_notion_update(update_function, max_retries=3, delay=1):
+    """重試機制處理Notion API的409衝突錯誤"""
+    for attempt in range(max_retries):
+        try:
+            return update_function()
+        except APIResponseError as e:
+            if "409" in str(e) and attempt < max_retries - 1:
+                logger.warning(f"遇到409衝突錯誤，第 {attempt + 1} 次重試，等待 {delay} 秒...")
+                time.sleep(delay)
+                delay *= 2  # 指數退避
+            else:
+                logger.error(f"Notion API錯誤 (嘗試 {attempt + 1}/{max_retries}): {str(e)}")
+                raise
+        except Exception as e:
+            logger.error(f"未預期的錯誤: {str(e)}")
+            raise
+
 # Define your custom functions getTitleWithoutSubtitle, checkBookSyncStatus, addEntryByTitle,
 # getUnSyncTarget, syncBookHighlights, updateBookLRTime, updateBookSpendTime as needed
 
@@ -193,19 +210,22 @@ def update_book_textinfo(page_id, text_property_name, text_value):
         # 清理HTML標籤
         clean_text = clean_html_tags(text_value)
         
-        notion.pages.update(
-            page_id=page_id,
-            properties={
-                text_property_name: {
-                    "rich_text": [
-                    {
-                        "text": {
-                                "content": clean_text
+        # 添加重試機制處理409錯誤
+        retry_notion_update(
+            lambda: notion.pages.update(
+                page_id=page_id,
+                properties={
+                    text_property_name: {
+                        "rich_text": [
+                        {
+                            "text": {
+                                    "content": clean_text
+                            }
                         }
-                    }
-                    ]
+                        ]
+                    },
                 },
-            },
+            )
         )
     else:
         print(f"No value provided for {text_property_name}, skipping update.")
@@ -268,28 +288,32 @@ def update_book_people(page_id, publisher_name=None, author_name=None):
     
     # 如果有需要更新的欄位才進行 API 調用
     if properties_to_update:
-        notion.pages.update(
-            page_id=page_id,
-            properties=properties_to_update
+        retry_notion_update(
+            lambda: notion.pages.update(
+                page_id=page_id,
+                properties=properties_to_update
+            )
         )
     else:
         print("No publisher or author name provided, skipping update.")
 
 def update_book_subtitle(page_id, subtitle):
     if subtitle:  # 檢查 subtitle 是否有值
-        notion.pages.update(
-            page_id=page_id,
-            properties={
-                "Subtitle": {
-                    "rich_text": [
-                        {
-                            "text": {
-                                "content": subtitle
+        retry_notion_update(
+            lambda: notion.pages.update(
+                page_id=page_id,
+                properties={
+                    "Subtitle": {
+                        "rich_text": [
+                            {
+                                "text": {
+                                    "content": subtitle
+                                }
                             }
-                        }
-                    ]
+                        ]
+                    },
                 },
-            },
+            )
         )
     else:
         print("No subtitle provided, skipping update.")
