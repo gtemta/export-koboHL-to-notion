@@ -5,4 +5,10 @@ __pycache__/
 *.pyc
 summaries/
 logs/
+*.log
 .claude/
+.pytest_cache/
+.venv/
+venv/
+/nul
+/1.ini
