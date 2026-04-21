@@ -1,5 +1,5 @@
 import os
-import DBReader
+from legacy import DBReader
 import logging
 from logging.handlers import RotatingFileHandler
 import requests
@@ -42,8 +42,8 @@ class GemmaSummarizer:
     """使用 Gemma 模型进行文本总结"""
     
     def __init__(self):
-        self.model_name = "gemma:2b"
-        self.api_url = "http://localhost:11434/api/generate"
+        self.model_name = os.getenv('OLLAMA_MODEL', 'gemma4:31b')
+        self.api_url = os.getenv('OLLAMA_API_URL', 'http://localhost:11434/api/generate')
         
     def summarize(self, text: str) -> str:
         """
@@ -85,7 +85,7 @@ class GemmaSummarizer:
                 result = response.json()
                 return result["response"]
             else:
-                logger.error(f"Gemma API 错误: {response.status_code}")
+                logger.error(f"Gemma API 错误: {response.status_code} - {response.text}")
                 return None
             
         except Exception as e:
@@ -142,7 +142,7 @@ def main():
             logger.info(f"Processing book: {book_title}")
             
             # 准备高亮文本
-            highlights_text = "\n".join(book_data['highlights'])
+            highlights_text = "\n".join(h for h in book_data['highlights'] if h and h.strip())
             
             # 使用 Gemma 总结
             summary = summarizer.summarize(highlights_text)
