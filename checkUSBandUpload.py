@@ -4,7 +4,7 @@ import subprocess
 import threading
 import time
 import logging
-import uploadToNotion
+import main as notion_sync
 try:
     import win32file
 except ImportError as e:
@@ -39,24 +39,28 @@ def execute_notion_upload(destination_dir):
             return
 
         os.chdir(destination_dir)
-        process = None  # 初始化變數，避免未定義錯誤
-        if UsPython:
-            uploadToNotion.export_highlights()
-        # else:
-        #     process = subprocess.Popen(
-        #         ["npm", "start"],
-        #         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        #         shell=True, encoding='utf-8')
-        while True:
-            output_line = process.stdout.readline()
-            if not output_line and process.poll() is not None:
-                break
-            print(output_line.strip())  # For real-time output
 
-        if process.returncode == 0:
+        if UsPython:
+            # Direct Python call via new clean-arch entry (main.py)
+            notion_sync.main()
             logging.info("upload to Notion succeeded")
         else:
-            logging.error("upload to Notion failed")
+            # Subprocess mode for Node.js
+            process = subprocess.Popen(
+                ["npm", "start"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                shell=True, encoding='utf-8')
+
+            while True:
+                output_line = process.stdout.readline()
+                if not output_line and process.poll() is not None:
+                    break
+                print(output_line.strip())  # For real-time output
+
+            if process.returncode == 0:
+                logging.info("upload to Notion succeeded")
+            else:
+                logging.error("upload to Notion failed")
 
     except Exception as e:
         logging.error(f"Exception: {e}")
