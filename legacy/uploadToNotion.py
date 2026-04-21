@@ -1,5 +1,17 @@
 import os
-import DBReader
+import sys as _sys
+
+# Legacy module — kept so Zettelkasten & USB-monitor paths keep working until
+# those features are ported into src/. New code should use main.py + src/ instead.
+# Support both `python legacy/uploadToNotion.py` and `python -m legacy.uploadToNotion`.
+_here = os.path.dirname(os.path.abspath(__file__))
+_root = os.path.dirname(_here)
+if _here not in _sys.path:
+    _sys.path.insert(0, _here)  # find sibling DBReader when run as a script
+if _root not in _sys.path:
+    _sys.path.insert(0, _root)  # find root-level zettelkasten_generator
+
+import DBReader  # noqa: E402
 from notion_client import Client
 from datetime import datetime
 import math
@@ -9,7 +21,42 @@ from logging.handlers import RotatingFileHandler
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
 import time
+from threading import Lock
+from functools import lru_cache
 from notion_client.errors import APIResponseError
+from typing import List, Optional
+
+# Import Zettelkasten module
+try:
+    from zettelkasten_generator import (
+        ZettelkastenCardGenerator,
+        ZettelkastenCard,
+        check_ollama_availability,
+        check_gemini_availability
+    )
+    ZETTELKASTEN_AVAILABLE = True
+except ImportError as e:
+    ZETTELKASTEN_AVAILABLE = False
+    print(f"Warning: Zettelkasten module not available: {e}")
+
+
+# Rate Limiter for Notion API (recommended: ~3 requests per second)
+class NotionRateLimiter:
+    """Thread-safe rate limiter for Notion API calls"""
+    def __init__(self, calls_per_second=3):
+        self.min_interval = 1.0 / calls_per_second
+        self.last_call = 0
+        self.lock = Lock()
+
+    def wait(self):
+        with self.lock:
+            elapsed = time.time() - self.last_call
+            if elapsed < self.min_interval:
+                time.sleep(self.min_interval - elapsed)
+            self.last_call = time.time()
+
+
+rate_limiter = NotionRateLimiter()
 
 # 设置日志配置
 def setup_logger():
@@ -62,22 +109,41 @@ load_dotenv()
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 
+# Zettelkasten configuration - Three-database architecture
+NOTION_BOOKS_DATABASE_ID = os.getenv("NOTION_BOOKS_DATABASE_ID")  # Books database
+NOTION_HIGHLIGHTS_DATABASE_ID = os.getenv("NOTION_HIGHLIGHTS_DATABASE_ID", NOTION_DATABASE_ID)  # Kobo highlights (default to main)
+NOTION_ZETTELKASTEN_DATABASE_ID = os.getenv("NOTION_ZETTELKASTEN_DATABASE_ID")  # Zettelkasten cards
+
+# Zettelkasten feature toggle
+ENABLE_ZETTELKASTEN_CARDS = os.getenv("ENABLE_ZETTELKASTEN_CARDS", "false").lower() == "true"
+ZETTELKASTEN_MAX_CARDS = int(os.getenv("ZETTELKASTEN_MAX_CARDS", "16"))
+ZETTELKASTEN_MIN_HIGHLIGHTS = int(os.getenv("ZETTELKASTEN_MIN_HIGHLIGHTS", "10"))
+
 # Initialize Notion client
 notion = Client(auth=NOTION_TOKEN)
 database = notion.databases.retrieve(NOTION_DATABASE_ID)
 
 def retry_notion_update(update_function, max_retries=3, delay=1):
-    """重試機制處理Notion API的409衝突錯誤"""
+    """重試機制處理Notion API的409衝突錯誤和429 rate limit"""
+    current_delay = delay
     for attempt in range(max_retries):
         try:
+            rate_limiter.wait()  # Rate limiting
             return update_function()
         except APIResponseError as e:
-            if "409" in str(e) and attempt < max_retries - 1:
-                logger.warning(f"遇到409衝突錯誤，第 {attempt + 1} 次重試，等待 {delay} 秒...")
-                time.sleep(delay)
-                delay *= 2  # 指數退避
+            error_str = str(e)
+            if "429" in error_str:
+                # Rate limit hit - wait longer
+                wait_time = current_delay * 2
+                logger.warning(f"Rate limit (429) hit，等待 {wait_time} 秒...")
+                time.sleep(wait_time)
+                current_delay *= 2
+            elif "409" in error_str and attempt < max_retries - 1:
+                logger.warning(f"遇到409衝突錯誤，第 {attempt + 1} 次重試，等待 {current_delay} 秒...")
+                time.sleep(current_delay)
+                current_delay *= 2  # 指數退避
             else:
-                logger.error(f"Notion API錯誤 (嘗試 {attempt + 1}/{max_retries}): {str(e)}")
+                logger.error(f"Notion API錯誤 (嘗試 {attempt + 1}/{max_retries}): {error_str}")
                 raise
         except Exception as e:
             logger.error(f"未預期的錯誤: {str(e)}")
@@ -101,6 +167,7 @@ def check_target(title, isExportDone=True):
         filter_property = "Exported" if isExportDone else "Exported"
         filter_value = True if isExportDone else False
 
+        rate_limiter.wait()  # Rate limiting
         target = notion.databases.query(
             database_id=NOTION_DATABASE_ID,
             filter={
@@ -146,6 +213,7 @@ def check_target(title, isExportDone=True):
 
 def update_book_time(page_id, time_property_name, time_value):
     if time_value is not None:
+        rate_limiter.wait()  # Rate limiting
         notion.pages.update(
             page_id=page_id,
             properties={
@@ -157,10 +225,11 @@ def update_book_time(page_id, time_property_name, time_value):
             },
         )
     else:
-        print(f"No value provided for {time_property_name}, skipping update.")
+        logger.debug(f"No value provided for {time_property_name}, skipping update.")
 
 def update_book_number(page_id, field_name, value):
     if value is not None:  # 檢查數值是否有提供
+        rate_limiter.wait()  # Rate limiting
         notion.pages.update(
             page_id=page_id,
             properties={
@@ -170,10 +239,11 @@ def update_book_number(page_id, field_name, value):
             }
         )
     else:
-        print(f"No value provided for {field_name}, skipping update.")
+        logger.debug(f"No value provided for {field_name}, skipping update.")
 
 def update_percentage(page_id, value):
     if value is not None:  # 檢查數值是否有提供
+        rate_limiter.wait()  # Rate limiting
         notion.pages.update(
                 page_id=page_id,
                 properties={
@@ -183,7 +253,7 @@ def update_percentage(page_id, value):
                 }
             )
     else:
-        print(f"No value provided for PercentageRead, skipping update.")
+        logger.debug("No value provided for PercentageRead, skipping update.")
 
 def clean_html_tags(text):
     """清理HTML標籤，保留純文本內容"""
@@ -228,7 +298,7 @@ def update_book_textinfo(page_id, text_property_name, text_value):
             )
         )
     else:
-        print(f"No value provided for {text_property_name}, skipping update.")
+        logger.debug(f"No value provided for {text_property_name}, skipping update.")
 
 def update_book_spend_time(page_id, bookSpendingTime):
     hours = math.floor(bookSpendingTime / 3600)
@@ -236,6 +306,7 @@ def update_book_spend_time(page_id, bookSpendingTime):
     seconds = bookSpendingTime % 60
     formatted_time = f"{hours:02}:{minutes:02}:{seconds:02}"
 
+    rate_limiter.wait()  # Rate limiting
     notion.pages.update(
         page_id=page_id,
         properties={
@@ -257,7 +328,7 @@ def update_time_related(page_id, book):
     update_book_time(page_id,"LastReadDate", book.get_date_last_read())
     update_book_time(page_id,"LastFinishedReadTime", book.get_last_time_finished_reading())
     update_percentage(page_id, book.get_percent_read())
-    print("Finish Update Time")
+    logger.info("Finish Update Time")
 
 def update_book_people(page_id, publisher_name=None, author_name=None):
     properties_to_update = {}
@@ -295,7 +366,7 @@ def update_book_people(page_id, publisher_name=None, author_name=None):
             )
         )
     else:
-        print("No publisher or author name provided, skipping update.")
+        logger.debug("No publisher or author name provided, skipping update.")
 
 def update_book_subtitle(page_id, subtitle):
     if subtitle:  # 檢查 subtitle 是否有值
@@ -316,7 +387,89 @@ def update_book_subtitle(page_id, subtitle):
             )
         )
     else:
-        print("No subtitle provided, skipping update.")
+        logger.debug("No subtitle provided, skipping update.")
+
+
+def build_page_properties(book, include_time=True, include_metadata=True):
+    """構建完整的頁面屬性字典，合併多個更新為單一 API 調用"""
+    properties = {}
+
+    if include_time:
+        # SpendReadingTime
+        time_spent = book.get_time_spent_reading()
+        if time_spent is not None:
+            hours = math.floor(time_spent / 3600)
+            minutes = math.floor((time_spent % 3600) / 60)
+            seconds = time_spent % 60
+            properties["SpendReadingTime"] = {
+                "rich_text": [{"type": "text", "text": {"content": f"{hours:02}:{minutes:02}:{seconds:02}"}}]
+            }
+
+        # LastReadDate
+        last_read = book.get_date_last_read()
+        if last_read:
+            properties["LastReadDate"] = {"date": {"start": last_read}}
+
+        # LastFinishedReadTime
+        last_finished = book.get_last_time_finished_reading()
+        if last_finished:
+            properties["LastFinishedReadTime"] = {"date": {"start": last_finished}}
+
+        # PercentageRead
+        percent = book.get_percent_read()
+        if percent is not None:
+            properties["PercentageRead"] = {"number": percent}
+
+    if include_metadata:
+        # Subtitle
+        subtitle = book.get_subtitle()
+        if subtitle:
+            properties["Subtitle"] = {
+                "rich_text": [{"text": {"content": subtitle}}]
+            }
+
+        # Publisher
+        publisher = book.get_publisher()
+        if publisher:
+            properties["Publisher"] = {
+                "rich_text": [{"text": {"content": publisher}}]
+            }
+
+        # Author
+        author = book.get_author()
+        if author:
+            properties["Author"] = {
+                "rich_text": [{"text": {"content": author}}]
+            }
+
+        # Description
+        description = book.get_description()
+        if description:
+            clean_desc = clean_html_tags(description)
+            properties["Description"] = {
+                "rich_text": [{"text": {"content": clean_desc}}]
+            }
+
+        # ISBN
+        isbn = book.get_isbn()
+        if isbn:
+            properties["ISBN"] = {
+                "rich_text": [{"text": {"content": isbn}}]
+            }
+
+    return properties
+
+
+def update_book_properties_batch(page_id, properties):
+    """批次更新頁面屬性，合併多個更新為單一 API 調用"""
+    if not properties:
+        logger.debug("No properties to update, skipping.")
+        return
+
+    retry_notion_update(
+        lambda: notion.pages.update(page_id=page_id, properties=properties)
+    )
+    logger.info(f"Updated {len(properties)} properties in single API call")
 
 
 
@@ -332,8 +485,8 @@ def sync_book_highlights(page_id, highlights_list):
             "rich_text": [{"type": "text", "text": {"content": "Highlights"}}],
         },
     })
-    print("Append Title")
-    print(len(highlights_list))
+    logger.debug("Append Title")
+    logger.debug(f"Highlights count: {len(highlights_list)}")
 
     for highlight in highlights_list:
         if highlight is not None:
@@ -355,6 +508,7 @@ def sync_book_highlights(page_id, highlights_list):
 
     append_blocks_to_page(page_id, blocks)
 
+    rate_limiter.wait()  # Rate limiting
     notion.pages.update(
         page_id=page_id,
         properties={"Exported": {"checkbox": True}},
@@ -455,14 +609,209 @@ def sync_book_highlights_with_chapter(page_id, highlights_with_chapter):
 
     append_blocks_to_page(page_id, blocks)
 
+    rate_limiter.wait()  # Rate limiting
     notion.pages.update(
         page_id=page_id,
         properties={"Exported": {"checkbox": True}},
     )
 
 
-def add_entry_by_title(book_title):
+def sync_zettelkasten_cards(
+    book_page_id: str,
+    highlights_page_id: str,
+    cards: List['ZettelkastenCard'],
+    book_title: str = ""
+) -> int:
+    """
+    Sync Zettelkasten cards to Notion database.
+
+    Creates card pages in the Zettelkasten database with relations to:
+    - Source Book (books database)
+    - Source Highlights Page (kobo highlights database)
+
+    Args:
+        book_page_id: The page ID in the books database (can be None if not using separate books DB)
+        highlights_page_id: The page ID in the kobo highlights database
+        cards: List of ZettelkastenCard objects to sync
+        book_title: Title of the source book
+
+    Returns:
+        Number of cards successfully synced
+    """
+    if not NOTION_ZETTELKASTEN_DATABASE_ID:
+        logger.warning("NOTION_ZETTELKASTEN_DATABASE_ID not configured, skipping Zettelkasten sync")
+        return 0
+
+    if not cards:
+        logger.info("No cards to sync")
+        return 0
+
+    logger.info(f"Syncing {len(cards)} Zettelkasten cards for '{book_title}'")
+
+    success_count = 0
+
+    for i, card in enumerate(cards):
+        try:
+            # Build the properties for the card page
+            properties = {
+                "Title": {
+                    "title": [{"text": {"content": card.title}}]
+                },
+                "Content": {
+                    "rich_text": [{"text": {"content": card.content}}]
+                },
+                "Source Highlight Text": {
+                    "rich_text": [{"text": {"content": card.source_highlight[:2000]}}]  # Notion limit
+                },
+                "Source Chapter": {
+                    "rich_text": [{"text": {"content": card.chapter_reference}}]
+                },
+                "Created Date": {
+                    "date": {"start": datetime.now().isoformat()}
+                }
+            }
+
+            # Add relation to Source Book if book_page_id is provided
+            if book_page_id and NOTION_BOOKS_DATABASE_ID:
+                properties["Source Book"] = {
+                    "relation": [{"id": book_page_id}]
+                }
+
+            # Add relation to Source Highlights Page
+            if highlights_page_id:
+                properties["Source Highlights Page"] = {
+                    "relation": [{"id": highlights_page_id}]
+                }
+
+            # Create the card page in Zettelkasten database
+            def create_card():
+                return notion.pages.create(
+                    parent={"database_id": NOTION_ZETTELKASTEN_DATABASE_ID},
+                    properties=properties
+                )
+
+            retry_notion_update(create_card)
+            success_count += 1
+            logger.info(f"Created card {i+1}/{len(cards)}: {card.title}")
+
+        except Exception as e:
+            logger.error(f"Failed to create card '{card.title}': {str(e)}")
+
+    logger.info(f"Zettelkasten sync complete: {success_count}/{len(cards)} cards created")
+    return success_count
+
+
+def get_book_page_from_books_database(book_title: str) -> Optional[str]:
+    """
+    Query the books database to find a matching book page.
+
+    Returns the page ID if found, None otherwise.
+    """
+    if not NOTION_BOOKS_DATABASE_ID:
+        return None
+
     try:
+        # Clean the title for searching
+        search_title = get_title_without_subtitle(book_title)
+
+        rate_limiter.wait()
+        response = notion.databases.query(
+            database_id=NOTION_BOOKS_DATABASE_ID,
+            filter={
+                "property": "Title",
+                "rich_text": {"contains": search_title}
+            }
+        )
+
+        results = response.get("results", [])
+        if results:
+            return results[0].get("id")
+
+        return None
+
+    except Exception as e:
+        logger.warning(f"Error querying books database: {str(e)}")
+        return None
+
+
+def generate_and_sync_zettelkasten_cards(
+    book,
+    highlights_with_chapter: List[dict],
+    highlights_page_id: str
+) -> int:
+    """
+    Generate and sync Zettelkasten cards for a book.
+
+    This is the main entry point for Zettelkasten card generation.
+    It handles:
+    1. Feature toggle check
+    2. Card generation with dual-layer LLM
+    3. Syncing to Notion
+
+    Args:
+        book: Book object with metadata
+        highlights_with_chapter: List of highlight dictionaries
+        highlights_page_id: The Notion page ID for the highlights
+
+    Returns:
+        Number of cards successfully synced
+    """
+    if not ENABLE_ZETTELKASTEN_CARDS:
+        logger.debug("Zettelkasten cards disabled")
+        return 0
+
+    if not ZETTELKASTEN_AVAILABLE:
+        logger.warning("Zettelkasten module not available")
+        return 0
+
+    if not NOTION_ZETTELKASTEN_DATABASE_ID:
+        logger.warning("NOTION_ZETTELKASTEN_DATABASE_ID not configured")
+        return 0
+
+    book_title = book.get_title()
+    logger.info(f"Starting Zettelkasten generation for '{book_title}'")
+
+    # Check service availability
+    if not check_ollama_availability():
+        logger.warning("Ollama service not available, skipping Zettelkasten generation")
+        return 0
+
+    try:
+        # Initialize generator
+        generator = ZettelkastenCardGenerator(
+            max_cards=ZETTELKASTEN_MAX_CARDS,
+            min_highlights=ZETTELKASTEN_MIN_HIGHLIGHTS
+        )
+
+        # Generate cards
+        cards = generator.generate_cards(highlights_with_chapter, book_title)
+
+        if not cards:
+            logger.info(f"No cards generated for '{book_title}'")
+            return 0
+
+        # Try to find book in books database (for relation)
+        book_page_id = get_book_page_from_books_database(book_title)
+
+        # Sync cards to Notion
+        synced_count = sync_zettelkasten_cards(
+            book_page_id=book_page_id,
+            highlights_page_id=highlights_page_id,
+            cards=cards,
+            book_title=book_title
+        )
+
+        return synced_count
+
+    except Exception as e:
+        logger.error(f"Error in Zettelkasten generation: {str(e)}", exc_info=True)
+        return 0
+
+
+def add_entry_by_title(book_title):
+    """創建新的 Notion 頁面並直接返回 page_id，避免額外的查詢"""
+    try:
+        rate_limiter.wait()  # Rate limiting
         # Create a new entry in the Notion database
         response = notion.pages.create(
             parent={
@@ -480,11 +829,12 @@ def add_entry_by_title(book_title):
                 },
             },
         )
-        print(f"Entry {book_title} added successfully!")
-        return True
+        page_id = response["id"]
+        logger.info(f"Entry {book_title} added successfully! Page ID: {page_id}")
+        return page_id  # 直接返回 page_id，避免額外查詢
     except Exception as error:
-        print("Error adding entry:", error)
-        return False
+        logger.error(f"Error adding entry: {error}")
+        return None
 
 def append_blocks_to_page(page_id, blocks):
     """安全地批次添加blocks到Notion頁面，遵守API限制並支持重試機制"""
@@ -506,6 +856,7 @@ def append_blocks_to_page(page_id, blocks):
             # 重試機制
             for attempt in range(MAX_RETRIES):
                 try:
+                    rate_limiter.wait()  # Rate limiting
                     notion.blocks.children.append(
                         block_id=page_id,
                         children=batch,
@@ -521,6 +872,7 @@ def append_blocks_to_page(page_id, blocks):
                         for j in range(0, len(batch), smaller_batch_size):
                             small_batch = batch[j:j + smaller_batch_size]
                             logger.info(f"上傳小批次: {len(small_batch)} 個blocks")
+                            rate_limiter.wait()  # Rate limiting
                             notion.blocks.children.append(
                                 block_id=page_id,
                                 children=small_batch,
@@ -549,11 +901,11 @@ def get_google_books_cover(title):
     """透過 Google Books API 查詢書籍封面（高解析度）"""
     url = f"https://www.googleapis.com/books/v1/volumes?q=intitle:{title.replace(' ', '+')}&maxResults=1"
     response = requests.get(url)
-    print(f"Google Books API Response: {response.status_code}")
-    
+    logger.debug(f"Google Books API Response: {response.status_code}")
+
     if response.status_code == 200:
         data = response.json()
-        print(f"Google Books API Data: {data}")
+        logger.debug(f"Google Books API Data: {data}")
         if "items" in data and len(data["items"]) > 0:
             volume_info = data["items"][0]["volumeInfo"]
             if "imageLinks" in volume_info:
@@ -561,32 +913,33 @@ def get_google_books_cover(title):
                 if thumbnail_url:
                     # 替換 `zoom=1` 為 `zoom=3` 取得較高清封面
                     high_res_url = thumbnail_url.replace("&zoom=1", "&zoom=3")
-                    print(f"Found High-Res Cover: {high_res_url}")
+                    logger.debug(f"Found High-Res Cover: {high_res_url}")
                     return high_res_url
-    print("No Google Books cover found.")
+    logger.debug("No Google Books cover found.")
     return None
 
 def get_openlibrary_cover(isbn):
     """透過 Open Library API 取得封面"""
     cover_url = f"https://covers.openlibrary.org/b/isbn/{isbn}-L.jpg"
-    print(f"Trying Open Library cover: {cover_url}")
+    logger.debug(f"Trying Open Library cover: {cover_url}")
     return cover_url
 
 def get_best_book_cover(title, isbn):
     """優先使用 Google Books API，若失敗則使用 Open Library API"""
-    print(f"Searching cover for: {title} (ISBN: {isbn})")
+    logger.debug(f"Searching cover for: {title} (ISBN: {isbn})")
     cover_url = get_google_books_cover(title)
     if cover_url:
         return cover_url
     if isbn:
         return get_openlibrary_cover(isbn)
-    print("No cover found from any source.")
+    logger.debug("No cover found from any source.")
     return None
 
 def update_notion_cover_and_icon(page_id, cover_url):
     """更新 Notion 頁面的封面與圖示為書籍封面"""
-    print(f"Updating Notion cover and icon for page {page_id} with URL: {cover_url}")
+    logger.debug(f"Updating Notion cover and icon for page {page_id} with URL: {cover_url}")
     if cover_url:
+        rate_limiter.wait()  # Rate limiting
         notion.pages.update(
             page_id=page_id,
             icon={
@@ -598,17 +951,24 @@ def update_notion_cover_and_icon(page_id, cover_url):
                 "external": {"url": cover_url}
             }
         )
-        print(f"Updated cover and icon for page {page_id}.")
+        logger.info(f"Updated cover and icon for page {page_id}.")
     else:
-        print("No cover image found.")
+        logger.debug("No cover image found.")
+
+
+@lru_cache(maxsize=100)
+def get_cached_page_info(page_id):
+    """快取頁面資訊，避免重複請求"""
+    rate_limiter.wait()  # Rate limiting
+    return notion.pages.retrieve(page_id)
 
 
 def check_notion_icon(page_id):
     """檢查 Notion 頁面是否已有封面圖示"""
-    page = notion.pages.retrieve(page_id)
+    page = get_cached_page_info(page_id)
     icon = page.get("icon") or {}  # 確保 icon 為 dict
     has_icon = isinstance(icon, dict) and icon.get("type") == "external" and "url" in icon.get("external", {})
-    print(f"Page {page_id} has icon: {has_icon}")
+    logger.debug(f"Page {page_id} has icon: {has_icon}")
     return has_icon
 
 def add_book_cover_to_notion(title, isbn, page_id):
@@ -617,47 +977,68 @@ def add_book_cover_to_notion(title, isbn, page_id):
         if cover_url:
             update_notion_cover_and_icon(page_id, cover_url)
         else:
-            print("No cover image available.")
+            logger.debug("No cover image available.")
     else:
-        print("Notion page already has a cover icon.")
+        logger.debug("Notion page already has a cover icon.")
 
 def process_single_book(book):
-    """处理单本书籍的函数"""
+    """处理单本书籍的函数 - 優化版本，減少 API 調用次數"""
     logger.info(f"Processing book: {book.get_title()}")
     try:
         title = get_title_without_subtitle(book.get_title())
         bookStatus = check_target(title, True) or {}
-        
+
         if bookStatus["is_target_valid"]:
+            # 已導出的書籍：只更新時間相關屬性（使用批次更新）
             logger.info(f"Book {title} already exported, updating reading time")
-            update_time_related(bookStatus["pageId"], book)
-            add_book_cover_to_notion(book.get_title(), book.get_isbn(), bookStatus["pageId"])
+            page_id = bookStatus["pageId"]
+            # 使用批次更新取代多個獨立調用
+            time_properties = build_page_properties(book, include_time=True, include_metadata=False)
+            if time_properties:
+                update_book_properties_batch(page_id, time_properties)
+            add_book_cover_to_notion(book.get_title(), book.get_isbn(), page_id)
             return True
         else:
             unDoneObj = check_target(title, False)
             page_id = unDoneObj["pageId"]
-            
+
             if not unDoneObj["is_target_valid"]:
                 logger.info(f"Book {title} doesn't exist, creating new entry")
-                valid = add_entry_by_title(title)
-                newObj = check_target(title, False)
-                page_id = newObj["pageId"]
+                # 直接使用返回的 page_id，避免額外查詢
+                page_id = add_entry_by_title(title)
+                if not page_id:
+                    logger.error(f"Failed to create entry for {title}")
+                    return False
             else:
                 logger.info(f"Book {title} exists, appending highlights")
                 return True
-                
+
             # 使用新的带章节信息的高亮内容函数
             highlights_with_chapter = DBReader.getHLWithChapterFromDB(book.get_id())
             logger.info(f"Found {len(highlights_with_chapter)} highlights with chapter info for book {title}")
             sync_book_highlights_with_chapter(page_id, highlights_with_chapter)
-            update_time_related(page_id, book)
-            update_book_subtitle(page_id, book.get_subtitle())
-            update_book_people(page_id, book.get_publisher(), book.get_author())
-            update_book_textinfo(page_id, "Description", book.get_description())
-            update_book_textinfo(page_id, "ISBN", book.get_isbn())
+
+            # 批次更新所有屬性（時間 + 元數據），減少 API 調用
+            all_properties = build_page_properties(book, include_time=True, include_metadata=True)
+            if all_properties:
+                update_book_properties_batch(page_id, all_properties)
+                logger.info(f"Batch updated all properties for {title}")
+
             add_book_cover_to_notion(book.get_title(), book.get_isbn(), page_id)
+
+            # Generate and sync Zettelkasten cards (if enabled)
+            if ENABLE_ZETTELKASTEN_CARDS and ZETTELKASTEN_AVAILABLE:
+                logger.info(f"Starting Zettelkasten card generation for {title}")
+                cards_synced = generate_and_sync_zettelkasten_cards(
+                    book=book,
+                    highlights_with_chapter=highlights_with_chapter,
+                    highlights_page_id=page_id
+                )
+                if cards_synced > 0:
+                    logger.info(f"Successfully created {cards_synced} Zettelkasten cards for {title}")
+
             return True
-            
+
     except Exception as error:
         logger.error(f"Error processing book {book.get_title()}: {str(error)}", exc_info=True)
         return False

@@ -1,0 +1,603 @@
+"""
+Zettelkasten Card Generator
+
+This module generates Zettelkasten (slip-box) style note cards from book highlights.
+It uses a dual-layer LLM architecture:
+- Ollama (Gemma) for fast local generation of card drafts
+- Gemini API for quality review and refinement
+"""
+
+import os
+import re
+import json
+import logging
+import requests
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional, Tuple
+from datetime import datetime
+
+# Setup logger
+logger = logging.getLogger('kobo_notion_sync')
+
+
+@dataclass
+class ZettelkastenCard:
+    """Represents a single Zettelkasten note card"""
+    id: str                           # Unique identifier
+    title: str                        # Card title (5-20 characters)
+    content: str                      # Card content (100-150 characters)
+    source_highlight: str             # Original highlight text
+    chapter_reference: str            # Source chapter name
+    chapter_progress: float           # Reading progress (0.0 - 1.0)
+    quality_score: int = 0            # Quality score from Gemini review (1-10)
+    revision_notes: str = ""          # Notes from Gemini review
+    created_at: datetime = field(default_factory=datetime.now)
+
+    def to_dict(self) -> Dict:
+        """Convert card to dictionary for serialization"""
+        return {
+            'id': self.id,
+            'title': self.title,
+            'content': self.content,
+            'source_highlight': self.source_highlight,
+            'chapter_reference': self.chapter_reference,
+            'chapter_progress': self.chapter_progress,
+            'quality_score': self.quality_score,
+            'revision_notes': self.revision_notes,
+            'created_at': self.created_at.isoformat()
+        }
+
+
+class CardSelectionAlgorithm:
+    """Algorithm for selecting the most valuable highlights for card generation"""
+
+    # Keywords that indicate important content
+    IMPORTANCE_KEYWORDS = [
+        '重要', '核心', '原則', '關鍵', '本質', '根本', '基礎', '基本',
+        '必須', '一定', '務必', '首先', '最重要', '記住', '注意',
+        '總之', '因此', '所以', '結論', '總結', '關鍵點', '要點',
+        'important', 'key', 'essential', 'fundamental', 'core', 'principle'
+    ]
+
+    def __init__(self, max_cards: int = 16, min_highlights: int = 10):
+        self.max_cards = max_cards
+        self.min_highlights = min_highlights
+
+    def should_generate_cards(self, highlights: List[Dict]) -> bool:
+        """Check if the number of highlights meets the minimum threshold"""
+        return len(highlights) >= self.min_highlights
+
+    def select_highlights(self, highlights: List[Dict]) -> List[Dict]:
+        """
+        Select the most valuable highlights for card generation.
+
+        Selection process:
+        1. Pre-filter: Remove too short (<30 chars) or too long (>500 chars) highlights
+        2. Score each highlight based on multiple factors
+        3. Distribute cards across chapters (max 3 per chapter)
+        4. Select top-scoring highlights up to max_cards
+        """
+        if not self.should_generate_cards(highlights):
+            logger.info(f"Highlight count ({len(highlights)}) below minimum threshold ({self.min_highlights}), skipping card generation")
+            return []
+
+        # Pre-filter highlights
+        filtered_highlights = self._pre_filter(highlights)
+        logger.info(f"After pre-filtering: {len(filtered_highlights)} highlights (from {len(highlights)})")
+
+        if len(filtered_highlights) < self.min_highlights:
+            logger.info(f"Filtered highlight count ({len(filtered_highlights)}) below minimum threshold")
+            return []
+
+        # Score all highlights
+        scored_highlights = [(h, self._calculate_score(h)) for h in filtered_highlights]
+        scored_highlights.sort(key=lambda x: x[1], reverse=True)
+
+        # Select with chapter distribution constraint
+        selected = self._select_with_chapter_distribution(scored_highlights)
+
+        logger.info(f"Selected {len(selected)} highlights for card generation")
+        return selected
+
+    def _pre_filter(self, highlights: List[Dict]) -> List[Dict]:
+        """Remove highlights that are too short or too long"""
+        filtered = []
+        for h in highlights:
+            text = h.get('text', '')
+            if text:
+                text_len = len(text.strip())
+                # Filter: 30-500 characters
+                if 30 <= text_len <= 500:
+                    filtered.append(h)
+        return filtered
+
+    def _calculate_score(self, highlight: Dict) -> float:
+        """
+        Calculate importance score for a highlight.
+
+        Scoring weights:
+        - Ideal length (80-200 chars): +3 points
+        - Chapter start/end position: +1.5 points
+        - Contains importance keywords: +0.5 points per keyword (max 2)
+        - Complete sentence: +1 point
+        """
+        score = 0.0
+        text = highlight.get('text', '').strip()
+        text_len = len(text)
+
+        # Length scoring
+        if 80 <= text_len <= 200:
+            score += 3.0
+        elif 60 <= text_len <= 250:
+            score += 2.0
+        elif 40 <= text_len <= 300:
+            score += 1.0
+
+        # Position scoring (beginning or end of chapter)
+        chapter_progress = highlight.get('current_chapter_progress', 0.5)
+        if chapter_progress is not None:
+            if chapter_progress < 0.15 or chapter_progress > 0.85:
+                score += 1.5
+
+        # Keyword scoring
+        keyword_count = 0
+        text_lower = text.lower()
+        for keyword in self.IMPORTANCE_KEYWORDS:
+            if keyword.lower() in text_lower:
+                keyword_count += 1
+                if keyword_count >= 2:
+                    break
+        score += keyword_count * 0.5
+
+        # Complete sentence bonus
+        if text.endswith(('。', '！', '？', '.', '!', '?')):
+            score += 1.0
+
+        return score
+
+    def _select_with_chapter_distribution(self, scored_highlights: List[Tuple[Dict, float]]) -> List[Dict]:
+        """
+        Select highlights ensuring even distribution across chapters.
+        Each chapter can have at most 3 cards.
+        """
+        chapter_counts = {}
+        selected = []
+        max_per_chapter = 3
+
+        for highlight, score in scored_highlights:
+            if len(selected) >= self.max_cards:
+                break
+
+            chapter = highlight.get('chapter_name', 'Unknown')
+            current_count = chapter_counts.get(chapter, 0)
+
+            # Penalty for chapters that already have many cards
+            if current_count >= max_per_chapter:
+                continue
+
+            selected.append(highlight)
+            chapter_counts[chapter] = current_count + 1
+
+        return selected
+
+
+class ZettelkastenLLMEnhancer:
+    """Uses Ollama (Gemma) to generate card titles and content"""
+
+    def __init__(self, api_url: str = None, model: str = None):
+        self.api_url = api_url or os.getenv('OLLAMA_API_URL', 'http://localhost:11434/api/generate')
+        self.model = model or os.getenv('OLLAMA_MODEL', 'gemma4:31b')
+
+    def generate_card(self, highlight: Dict, book_title: str = "") -> Optional[ZettelkastenCard]:
+        """
+        Generate a Zettelkasten card from a highlight using Ollama.
+
+        Returns a ZettelkastenCard with:
+        - Title: 5-15 characters summarizing the core concept
+        - Content: 100-150 characters atomic note in own words
+        """
+        text = highlight.get('text', '').strip()
+        chapter = highlight.get('chapter_name', 'Unknown')
+        progress = highlight.get('chapter_progress', 0.0)
+
+        if not text:
+            return None
+
+        prompt = self._build_prompt(text, book_title)
+
+        try:
+            response = requests.post(
+                self.api_url,
+                json={
+                    "model": self.model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.7,
+                        "num_predict": 500
+                    }
+                },
+                timeout=60
+            )
+
+            if response.status_code == 200:
+                result = response.json()
+                generated_text = result.get("response", "")
+                title, content = self._parse_response(generated_text, text)
+
+                if title and content:
+                    card_id = f"card_{datetime.now().strftime('%Y%m%d%H%M%S')}_{hash(text) % 10000:04d}"
+                    return ZettelkastenCard(
+                        id=card_id,
+                        title=title,
+                        content=content,
+                        source_highlight=text,
+                        chapter_reference=chapter,
+                        chapter_progress=progress or 0.0
+                    )
+            else:
+                logger.error(f"Ollama API error: {response.status_code}")
+
+        except requests.exceptions.Timeout:
+            logger.error("Ollama API timeout")
+        except requests.exceptions.ConnectionError:
+            logger.error("Cannot connect to Ollama API. Make sure Ollama is running.")
+        except Exception as e:
+            logger.error(f"Error generating card with Ollama: {str(e)}")
+
+        return None
+
+    def _build_prompt(self, highlight_text: str, book_title: str = "") -> str:
+        """Build the prompt for card generation"""
+        book_context = f"書名：{book_title}\n" if book_title else ""
+
+        return f"""你是一位卡片盒筆記專家。請為以下書籍劃線生成一張卡片筆記。
+
+{book_context}劃線內容：
+{highlight_text}
+
+請生成卡片筆記，格式如下：
+【標題】5-15個字，概括這段話的核心概念
+【內容】100-150個字，用你自己的話重新闡述這個觀點的關鍵洞見，要確保這是一個完整、獨立的原子筆記
+
+注意事項：
+1. 標題要精準、簡潔，能讓人一眼看出核心概念
+2. 內容要用自己的話重述，不要直接複製原文
+3. 內容要包含原文的關鍵洞見，但要更精煉
+4. 使用繁體中文，符合台灣用語習慣
+5. 確保內容是獨立完整的，不需要回頭看原文也能理解
+
+請直接輸出，不要加任何解釋："""
+
+    def _parse_response(self, response_text: str, original_text: str) -> Tuple[Optional[str], Optional[str]]:
+        """Parse the LLM response to extract title and content"""
+        title = None
+        content = None
+
+        # Try to extract title
+        title_patterns = [
+            r'【標題】\s*(.+?)(?=【|$)',
+            r'標題[：:]\s*(.+?)(?=內容|$)',
+            r'\*\*標題\*\*[：:]\s*(.+?)(?=\*\*|$)',
+        ]
+
+        for pattern in title_patterns:
+            match = re.search(pattern, response_text, re.DOTALL)
+            if match:
+                title = match.group(1).strip()
+                # Clean up the title
+                title = re.sub(r'[\n\r]', '', title)
+                title = title[:50] if len(title) > 50 else title  # Max 50 chars
+                break
+
+        # Try to extract content
+        content_patterns = [
+            r'【內容】\s*(.+?)(?=【|$)',
+            r'內容[：:]\s*(.+?)(?=$)',
+            r'\*\*內容\*\*[：:]\s*(.+?)(?=\*\*|$)',
+        ]
+
+        for pattern in content_patterns:
+            match = re.search(pattern, response_text, re.DOTALL)
+            if match:
+                content = match.group(1).strip()
+                # Clean up multiple newlines
+                content = re.sub(r'\n{2,}', '\n', content)
+                break
+
+        # Fallback: if no structured format, try to split by newline
+        if not title or not content:
+            lines = [l.strip() for l in response_text.strip().split('\n') if l.strip()]
+            if len(lines) >= 2:
+                if not title:
+                    title = lines[0][:50]
+                if not content:
+                    content = ' '.join(lines[1:])
+
+        # Final fallback: generate simple title from original text
+        if not title and original_text:
+            title = original_text[:20] + "..." if len(original_text) > 20 else original_text
+
+        if not content and original_text:
+            content = original_text[:150] if len(original_text) > 150 else original_text
+
+        return title, content
+
+    def batch_generate(self, highlights: List[Dict], book_title: str = "") -> List[ZettelkastenCard]:
+        """Generate cards for multiple highlights"""
+        cards = []
+        for i, highlight in enumerate(highlights):
+            logger.info(f"Generating card {i+1}/{len(highlights)}...")
+            card = self.generate_card(highlight, book_title)
+            if card:
+                cards.append(card)
+        return cards
+
+
+class GeminiReviewer:
+    """Uses Gemini API to review and refine card quality"""
+
+    def __init__(self, api_key: str = None, model: str = None, review_threshold: int = None):
+        self.api_key = api_key or os.getenv('GEMINI_API_KEY')
+        self.model = model or os.getenv('GEMINI_MODEL', 'gemini-2.0-flash')
+        self.review_threshold = review_threshold or int(os.getenv('GEMINI_REVIEW_THRESHOLD', '6'))
+        self.api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
+
+    def is_available(self) -> bool:
+        """Check if Gemini API is configured"""
+        return bool(self.api_key)
+
+    def review_and_refine(self, card: ZettelkastenCard) -> ZettelkastenCard:
+        """
+        Review a single card and refine if quality is below threshold.
+
+        Returns the card with updated quality_score and potentially refined content.
+        """
+        if not self.is_available():
+            logger.warning("Gemini API not configured, skipping review")
+            card.quality_score = 7  # Default score when review is skipped
+            return card
+
+        prompt = self._build_review_prompt(card)
+
+        try:
+            response = requests.post(
+                f"{self.api_url}?key={self.api_key}",
+                headers={"Content-Type": "application/json"},
+                json={
+                    "contents": [{
+                        "parts": [{"text": prompt}]
+                    }],
+                    "generationConfig": {
+                        "temperature": 0.3,
+                        "maxOutputTokens": 1000
+                    }
+                },
+                timeout=30
+            )
+
+            if response.status_code == 200:
+                result = response.json()
+                generated_text = result.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+
+                reviewed_card = self._parse_review_response(generated_text, card)
+                return reviewed_card
+            else:
+                logger.error(f"Gemini API error: {response.status_code} - {response.text}")
+                card.quality_score = 7
+                return card
+
+        except Exception as e:
+            logger.error(f"Error reviewing card with Gemini: {str(e)}")
+            card.quality_score = 7
+            return card
+
+    def _build_review_prompt(self, card: ZettelkastenCard) -> str:
+        """Build the review prompt for Gemini"""
+        return f"""你是卡片筆記品質審核員。請審核以下卡片筆記，確保：
+1. 標題精準概括核心概念（5-20字）
+2. 內容是獨立完整的原子筆記（100-150字）
+3. 用語清晰、邏輯通順
+4. 忠實於原文意涵
+
+原始劃線：
+{card.source_highlight}
+
+初稿標題：{card.title}
+
+初稿內容：
+{card.content}
+
+請以 JSON 格式輸出審核結果（只輸出 JSON，不要加其他文字）：
+{{
+  "title": "優化後的標題（如無需修改則保持原樣）",
+  "content": "優化後的內容（如無需修改則保持原樣）",
+  "quality_score": 1到10的評分,
+  "revision_notes": "修改說明（如無修改則為空字串）"
+}}"""
+
+    def _parse_review_response(self, response_text: str, original_card: ZettelkastenCard) -> ZettelkastenCard:
+        """Parse the Gemini review response"""
+        try:
+            # Try to extract JSON from the response
+            json_match = re.search(r'\{[^{}]*\}', response_text, re.DOTALL)
+            if json_match:
+                review_data = json.loads(json_match.group())
+
+                quality_score = review_data.get('quality_score', 7)
+                revision_notes = review_data.get('revision_notes', '')
+
+                # Only apply refinements if quality is below threshold
+                if quality_score < self.review_threshold:
+                    original_card.title = review_data.get('title', original_card.title)
+                    original_card.content = review_data.get('content', original_card.content)
+                    logger.info(f"Card refined by Gemini (score: {quality_score})")
+                else:
+                    logger.info(f"Card quality acceptable (score: {quality_score}), keeping original")
+
+                original_card.quality_score = quality_score
+                original_card.revision_notes = revision_notes
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"Failed to parse Gemini response as JSON: {e}")
+            original_card.quality_score = 7
+        except Exception as e:
+            logger.error(f"Error parsing Gemini review: {e}")
+            original_card.quality_score = 7
+
+        return original_card
+
+    def batch_review(self, cards: List[ZettelkastenCard]) -> List[ZettelkastenCard]:
+        """
+        Review multiple cards.
+
+        For efficiency, this processes cards one at a time but could be
+        optimized for batch API calls if needed.
+        """
+        if not self.is_available():
+            logger.warning("Gemini API not configured, skipping batch review")
+            for card in cards:
+                card.quality_score = 7
+            return cards
+
+        reviewed_cards = []
+        for i, card in enumerate(cards):
+            logger.info(f"Reviewing card {i+1}/{len(cards)}...")
+            reviewed_card = self.review_and_refine(card)
+            reviewed_cards.append(reviewed_card)
+
+        return reviewed_cards
+
+
+class ZettelkastenCardGenerator:
+    """
+    Main class that orchestrates the entire card generation process.
+
+    Flow:
+    1. Check if highlights meet minimum threshold
+    2. Select best highlights using CardSelectionAlgorithm
+    3. Generate draft cards using ZettelkastenLLMEnhancer (Ollama)
+    4. Review and refine cards using GeminiReviewer
+    """
+
+    def __init__(self,
+                 max_cards: int = None,
+                 min_highlights: int = None,
+                 enable_gemini_review: bool = True):
+
+        self.max_cards = max_cards or int(os.getenv('ZETTELKASTEN_MAX_CARDS', '16'))
+        self.min_highlights = min_highlights or int(os.getenv('ZETTELKASTEN_MIN_HIGHLIGHTS', '10'))
+        self.enable_gemini_review = enable_gemini_review
+
+        self.selector = CardSelectionAlgorithm(
+            max_cards=self.max_cards,
+            min_highlights=self.min_highlights
+        )
+        self.enhancer = ZettelkastenLLMEnhancer()
+        self.reviewer = GeminiReviewer()
+
+    def generate_cards(self, highlights: List[Dict], book_title: str = "") -> List[ZettelkastenCard]:
+        """
+        Generate Zettelkasten cards from book highlights.
+
+        Args:
+            highlights: List of highlight dictionaries from DBReader
+            book_title: Title of the book (for context)
+
+        Returns:
+            List of ZettelkastenCard objects
+        """
+        logger.info(f"Starting Zettelkasten card generation for '{book_title}'")
+        logger.info(f"Total highlights: {len(highlights)}, Max cards: {self.max_cards}, Min threshold: {self.min_highlights}")
+
+        # Step 1: Check threshold
+        if not self.selector.should_generate_cards(highlights):
+            logger.info(f"Skipping card generation: only {len(highlights)} highlights (minimum: {self.min_highlights})")
+            return []
+
+        # Step 2: Select best highlights
+        selected_highlights = self.selector.select_highlights(highlights)
+        if not selected_highlights:
+            logger.info("No highlights selected after filtering")
+            return []
+
+        logger.info(f"Selected {len(selected_highlights)} highlights for card generation")
+
+        # Step 3: Generate draft cards with Ollama
+        logger.info("Generating draft cards with Ollama (Gemma)...")
+        draft_cards = self.enhancer.batch_generate(selected_highlights, book_title)
+
+        if not draft_cards:
+            logger.warning("No cards generated from Ollama")
+            return []
+
+        logger.info(f"Generated {len(draft_cards)} draft cards")
+
+        # Step 4: Review and refine with Gemini (optional)
+        if self.enable_gemini_review and self.reviewer.is_available():
+            logger.info("Reviewing cards with Gemini API...")
+            final_cards = self.reviewer.batch_review(draft_cards)
+        else:
+            logger.info("Skipping Gemini review (disabled or not configured)")
+            final_cards = draft_cards
+            for card in final_cards:
+                card.quality_score = 7  # Default score
+
+        logger.info(f"Card generation complete: {len(final_cards)} cards")
+
+        # Log quality statistics
+        if final_cards:
+            avg_score = sum(c.quality_score for c in final_cards) / len(final_cards)
+            logger.info(f"Average quality score: {avg_score:.1f}/10")
+
+        return final_cards
+
+
+def check_ollama_availability() -> bool:
+    """Check if Ollama service is running and accessible"""
+    api_url = os.getenv('OLLAMA_API_URL', 'http://localhost:11434/api/tags')
+    try:
+        response = requests.get(api_url.replace('/api/generate', '/api/tags'), timeout=5)
+        return response.status_code == 200
+    except:
+        return False
+
+
+def check_gemini_availability() -> bool:
+    """Check if Gemini API key is configured"""
+    return bool(os.getenv('GEMINI_API_KEY'))
+
+
+# For testing
+if __name__ == "__main__":
+    # Setup basic logging for testing
+    logging.basicConfig(level=logging.INFO)
+
+    print("Checking service availability...")
+    print(f"Ollama available: {check_ollama_availability()}")
+    print(f"Gemini configured: {check_gemini_availability()}")
+
+    # Test with sample data
+    sample_highlights = [
+        {
+            'text': '成功的關鍵不在於你做了什麼，而在於你持續做了什麼。一致性比強度更重要，因為只有持續的行動才能帶來複利效應。',
+            'chapter_name': '第一章：開始',
+            'chapter_progress': 0.1,
+            'current_chapter_progress': 0.5
+        },
+        {
+            'text': '學習最有效的方式是教導他人。當你必須解釋一個概念時，你會發現自己對它的理解還不夠深入，這促使你更深入地學習。',
+            'chapter_name': '第二章：學習',
+            'chapter_progress': 0.3,
+            'current_chapter_progress': 0.2
+        }
+    ] * 6  # Duplicate to meet minimum threshold
+
+    generator = ZettelkastenCardGenerator(max_cards=3, min_highlights=5)
+    cards = generator.generate_cards(sample_highlights, "測試書籍")
+
+    print(f"\nGenerated {len(cards)} cards:")
+    for card in cards:
+        print(f"\n--- {card.title} ---")
+        print(f"Content: {card.content}")
+        print(f"Quality: {card.quality_score}/10")
