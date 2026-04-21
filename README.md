@@ -13,8 +13,7 @@ A Python-based tool that exports Kobo e-reader highlights and notes to a Notion 
 
 ### 環境要求
 
-- Python 3.7+
-- Node.js（用於原始功能）
+- Python 3.8+
 - Git（用於版本控制）
 
 您需要配置一個可以訪問您要使用的資料庫（您的「圖書館」資料庫）的 Notion「整合」。Notion 提供了如何設置整合的說明[在此](https://developers.notion.com/docs#step-1-create-an-integration)，您可以透過與整合共享資料庫來讓它訪問您的圖書館資料庫。
@@ -45,10 +44,10 @@ A Python-based tool that exports Kobo e-reader highlights and notes to a Notion 
 
 5. 前往您的 Notion 圖書館資料庫，確保資料庫包含一個帶有書名的「Title」屬性，以及一個預設為未勾選的「Highlights」核取方塊屬性。（腳本將根據標題匹配書籍，然後查看是否已經上傳了摘錄：如果沒有，它將上傳它們，然後將「Highlights」方塊設為已勾選）。
 
-6. 執行腳本：
-   - 使用 Python 版本（推薦）：`python uploadToNotion.py`
-   - 使用 Node.js 版本：`npm start`
-   
+6. 執行腳本:
+   - **推薦**: `python main.py` (clean architecture,主要入口)
+   - Zettelkasten/USB 自動化舊流程: `python -m legacy.uploadToNotion`
+
    然後檢查您的 Notion 資料庫以確認它是否有效。
 
 ### 章節信息說明
@@ -128,29 +127,14 @@ A Python-based tool that exports Kobo e-reader highlights and notes to a Notion 
 1. **準備Kobo數據庫文件**：
    - 將Kobo設備的`KoboReader.sqlite`文件複製到項目目錄
 
-2. **運行同步**：
+2. **運行同步** (主要入口):
    ```bash
-   python uploadToNotion.py
+   python main.py
    ```
 
-3. **測試章節提取功能**：
+3. **舊版同步流程** (保留 Zettelkasten/USB 監控功能):
    ```bash
-   python test_chapter_extraction.py
-   ```
-
-4. **查看階層式排列演示**：
-   ```bash
-   python demo_hierarchical_output.py
-   ```
-
-5. **查看簡潔markdown語法演示**：
-   ```bash
-   python demo_simple_markdown_output.py
-   ```
-
-6. **測試不同書籍的章節提取**：
-   ```bash
-   python test_different_book.py
+   python -m legacy.uploadToNotion
    ```
 
 ## 數據庫結構
@@ -176,20 +160,27 @@ book_id!OEBPS!Text/chapter_name.xhtml
 
 ## 代碼結構
 
-### 主要文件
+採用 clean architecture 分層,主入口 `main.py` 組合 `src/` 各層:
 
-- `DBReader.py`：數據庫讀取和章節信息提取
-- `uploadToNotion.py`：Notion同步和格式化
-- `test_chapter_extraction.py`：功能測試腳本
-- `demo_hierarchical_output.py`：階層式排列演示腳本
-- `demo_simple_markdown_output.py`：簡潔markdown語法演示腳本
-- `test_different_book.py`：不同書籍章節提取測試腳本
-
-### 核心函數
-
-- `getHLWithChapterFromDB()`：獲取帶章節信息的高亮內容
-- `extract_chapter_name()`：從ContentID提取章節名稱（支持多種格式）
-- `sync_book_highlights_with_chapter()`：同步帶章節信息的高亮到Notion（簡潔markdown格式）
+```
+main.py                                  主入口
+src/
+├── config/settings.py                   環境變數載入
+├── domain/                              核心實體與介面 (無依賴)
+│   ├── entities/                        Book / Chapter / Highlight
+│   ├── repositories/                    Repository 抽象介面
+│   └── services/chapter_extractor.py    章節名稱 fallback 策略
+├── application/
+│   ├── use_cases/sync_books_use_case.py 同步流程
+│   └── dtos/sync_result.py
+└── infrastructure/                      外部服務實作
+    ├── persistence/                     Kobo SQLite 讀取、章節啟發式
+    ├── notion/                          Notion API、rate limiter、重試
+    └── external/cover_fetcher.py        Google Books / Open Library 封面
+legacy/                                  舊版 monolithic 程式碼
+├── DBReader.py                          保留給尚未遷移的模組 (tests/analysis/Zettelkasten)
+└── uploadToNotion.py                    Zettelkasten 及 USB 自動化仍使用
+```
 
 ## 注意事項
 

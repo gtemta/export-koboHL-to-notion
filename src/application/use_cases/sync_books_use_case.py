@@ -96,14 +96,15 @@ class SyncBooksUseCase:
             # 獲取並處理高亮內容
             highlights = self.book_repo.get_highlights_with_chapters(book.id)
             
-            # 使用章節提取器處理高亮內容
+            # Repo 已做完整章節提取;extractor 僅在章節名稱仍為預設值時作 fallback
             for highlight in highlights:
-                highlight_data = {
-                    'text': highlight.text,
-                    'content_id': highlight.content_id,
-                    'start_container_path': highlight.start_container_path
-                }
-                highlight.chapter_name = self.chapter_extractor.extract_chapter_name(highlight_data)
+                if highlight.chapter_name in (None, '', '未知章節', '未知章节'):
+                    highlight_data = {
+                        'text': highlight.text,
+                        'content_id': highlight.content_id,
+                        'start_container_path': highlight.start_container_path
+                    }
+                    highlight.chapter_name = self.chapter_extractor.extract_chapter_name(highlight_data)
             
             self.logger.info(f"找到 {len(highlights)} 個高亮內容，開始同步")
             
