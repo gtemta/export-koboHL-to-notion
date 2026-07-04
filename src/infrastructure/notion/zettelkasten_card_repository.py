@@ -26,6 +26,16 @@ _RICH_TEXT_LIMIT = 2000
 _SOURCE_ID_PROPERTY = "來源劃線ID"
 # multi_select property holding concept tags, for cross-book browsing by concept.
 _TOPIC_PROPERTY = "主題"
+# number property: Gemini's quality score (1-10); select: card processing stage.
+_QUALITY_PROPERTY = "品質分數"
+_STATUS_PROPERTY = "狀態"
+_STATUS_DRAFT = "草稿"
+_STATUS_REVIEWED = "已審"
+# score at/above which a card counts as reviewed rather than a rough draft.
+_REVIEWED_SCORE = 7
+
+# sentinel: schema not yet fetched (distinct from "fetched, empty/unreadable").
+_UNSET = object()
 
 
 class ZettelkastenCardRepository:
@@ -48,6 +58,8 @@ class ZettelkastenCardRepository:
         self._books_database_id = books_database_id
         self._client = Client(auth=token)
         self._rate_limiter = rate_limiter or NotionRateLimiter()
+        # cached card-DB property names; _UNSET until first fetched, None if unreadable
+        self._schema_props = _UNSET
 
     def upload_cards(self, cards: List[ZettelkastenCard], book_title: str) -> int:
         if not cards:
@@ -215,18 +227,58 @@ class ZettelkastenCardRepository:
 
     def _build_properties(self, card: ZettelkastenCard,
                           books_page_id: Optional[str]) -> dict:
+        # 標題 (title) is mandatory; everything else is optional and only written
+        # if the DB actually has that property (see _wants), so a card box that
+        # hasn't added the new columns yet still uploads instead of erroring.
         props: dict = {
             "標題": {"title": [{"text": {"content": card.title[:_RICH_TEXT_LIMIT]}}]},
-            _SOURCE_ID_PROPERTY: {
-                "rich_text": [{"text": {"content": self._card_source_id(card)}}]
-            },
         }
+        if self._wants(_SOURCE_ID_PROPERTY):
+            props[_SOURCE_ID_PROPERTY] = {
+                "rich_text": [{"text": {"content": self._card_source_id(card)}}]
+            }
         options = self._tag_options(card)
-        if options:
+        if options and self._wants(_TOPIC_PROPERTY):
             props[_TOPIC_PROPERTY] = {"multi_select": options}
-        if books_page_id:
+        score = getattr(card, "quality_score", 0) or 0
+        if score > 0 and self._wants(_QUALITY_PROPERTY):
+            props[_QUALITY_PROPERTY] = {"number": score}
+        if self._wants(_STATUS_PROPERTY):
+            props[_STATUS_PROPERTY] = {"select": {"name": self._status_name(card)}}
+        if books_page_id and self._wants("來源"):
             props["來源"] = {"relation": [{"id": books_page_id}]}
         return props
+
+    @staticmethod
+    def _status_name(card: ZettelkastenCard) -> str:
+        """草稿 for a rough draft, 已審 once its score clears the reviewed bar.
+
+        永久筆記 is a human decision and is never set automatically.
+        """
+        score = getattr(card, "quality_score", 0) or 0
+        return _STATUS_REVIEWED if score >= _REVIEWED_SCORE else _STATUS_DRAFT
+
+    def _wants(self, prop_name: str) -> bool:
+        """Whether to write a property: yes if the DB has it, or if the schema
+        couldn't be read (then we don't second-guess and write as before)."""
+        known = self._known_properties()
+        return known is None or prop_name in known
+
+    def _known_properties(self) -> Optional[Set[str]]:
+        if self._schema_props is _UNSET:
+            self._schema_props = self._fetch_property_names()
+        return self._schema_props
+
+    def _fetch_property_names(self) -> Optional[Set[str]]:
+        try:
+            db = retry_with_backoff(
+                lambda: self._client.databases.retrieve(self._database_id),
+                self._rate_limiter,
+            ) or {}
+            return set((db.get("properties") or {}).keys())
+        except Exception as e:
+            logger.warning(f"讀取卡片盒 schema 失敗，將照舊寫入全部屬性: {e}")
+            return None
 
     @staticmethod
     def _tag_options(card: ZettelkastenCard) -> List[dict]:
@@ -277,7 +329,23 @@ class ZettelkastenCardRepository:
                 },
             })
 
+        notes = (getattr(card, "revision_notes", "") or "").strip()
+        if notes:
+            blocks.append(self._revision_toggle(notes))
+
         return blocks
+
+    @staticmethod
+    def _revision_toggle(notes: str) -> dict:
+        """Collapsible block holding Gemini's revision notes, for later review."""
+        return {
+            "object": "block",
+            "type": "toggle",
+            "toggle": {
+                "rich_text": [{"type": "text", "text": {"content": "🔍 AI 審稿修改說明"}}],
+                "children": [_paragraph(notes[:_RICH_TEXT_LIMIT])],
+            },
+        }
 
 
 def _paragraph(text: str) -> dict:

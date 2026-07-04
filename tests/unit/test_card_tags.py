@@ -52,6 +52,7 @@ def _card(tags):
 class TestTagProperties(unittest.TestCase):
     def setUp(self):
         self.repo = ZettelkastenCardRepository(token="dummy", database_id="db")
+        self.repo._schema_props = None  # skip schema fetch; write all props
 
     def test_multi_select_written(self):
         props = self.repo._build_properties(_card(["習慣", "複利"]), books_page_id=None)

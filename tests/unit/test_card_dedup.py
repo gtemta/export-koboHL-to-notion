@@ -22,7 +22,9 @@ def _card(title="卡片", highlight="來源劃線文字", bookmark_id=""):
 
 def _repo():
     # Client(auth=...) does no network at construction.
-    return ZettelkastenCardRepository(token="dummy", database_id="db")
+    repo = ZettelkastenCardRepository(token="dummy", database_id="db")
+    repo._schema_props = None  # skip schema fetch; write all props (legacy path)
+    return repo
 
 
 class TestCardSourceId(unittest.TestCase):
