@@ -33,6 +33,7 @@ class ZettelkastenCard:
     quality_score: int = 0            # Quality score from Gemini review (1-10)
     revision_notes: str = ""          # Notes from Gemini review
     source_bookmark_id: str = ""      # Kobo BookmarkID of the source highlight
+    tags: List[str] = field(default_factory=list)  # Concept tags (2-3)
     created_at: datetime = field(default_factory=datetime.now)
 
     def to_dict(self) -> Dict:
@@ -47,6 +48,7 @@ class ZettelkastenCard:
             'quality_score': self.quality_score,
             'revision_notes': self.revision_notes,
             'source_bookmark_id': self.source_bookmark_id,
+            'tags': self.tags,
             'created_at': self.created_at.isoformat()
         }
 
@@ -273,6 +275,7 @@ class ZettelkastenLLMEnhancer:
                         chapter_reference=chapter,
                         chapter_progress=progress or 0.0,
                         source_bookmark_id=str(highlight.get('bookmark_id') or ''),
+                        tags=self._extract_tags(generated_text),
                     )
             else:
                 elapsed = time.monotonic() - start_time
@@ -322,6 +325,7 @@ class ZettelkastenLLMEnhancer:
 請生成卡片筆記，格式如下：
 【標題】5-15個字，概括這段話的核心概念
 【內容】100-150個字，用你自己的話重新闡述這個觀點的關鍵洞見，要確保這是一個完整、獨立的原子筆記
+【標籤】2-3個概念標籤，用頓號分隔（例如：習慣、複利、系統思考），方便日後跨書用概念瀏覽
 
 注意事項：
 1. 標題要精準、簡潔，能讓人一眼看出核心概念
@@ -329,6 +333,7 @@ class ZettelkastenLLMEnhancer:
 3. 內容要包含原文的關鍵洞見，但要更精煉
 4. 使用繁體中文，符合台灣用語習慣
 5. 確保內容是獨立完整的，不需要回頭看原文也能理解
+6. 標籤要用抽象的概念詞，不要用書名或章節名
 
 請直接輸出，不要加任何解釋："""
 
@@ -413,6 +418,27 @@ class ZettelkastenLLMEnhancer:
 
         return title, content
 
+    _TAG_LINE = re.compile(r'【標籤】\s*(.+?)(?=【|###|\n\n|$)', re.DOTALL)
+    _TAG_SPLIT = re.compile(r'[、,，/|｜\s]+')
+
+    @classmethod
+    def _extract_tags(cls, text: str, limit: int = 3) -> List[str]:
+        """Pull 2-3 concept tags from a 【標籤】 line; [] if absent."""
+        if not text:
+            return []
+        match = cls._TAG_LINE.search(text)
+        if not match:
+            return []
+        raw = match.group(1).strip()
+        tags: List[str] = []
+        for part in cls._TAG_SPLIT.split(raw):
+            tag = part.strip().lstrip('#').replace('，', '').replace(',', '')
+            if tag and tag not in tags:
+                tags.append(tag)
+            if len(tags) >= limit:
+                break
+        return tags
+
     def _build_batch_prompt(self, highlights: List[Dict], book_title: str = "") -> str:
         n = len(highlights)
         book_context = f"書名：{book_title}\n\n" if book_title else ""
@@ -429,7 +455,10 @@ class ZettelkastenLLMEnhancer:
 
         format_lines = []
         for i in range(1, n + 1):
-            format_lines.append(f"### CARD_{i}\n【標題】5-15個字...\n【內容】100-150個字...")
+            format_lines.append(
+                f"### CARD_{i}\n【標題】5-15個字...\n【內容】100-150個字...\n"
+                f"【標籤】2-3個概念標籤，用頓號分隔"
+            )
         format_example = "\n".join(format_lines)
 
         return f"""你是一位卡片盒筆記專家。請為以下書籍的 {n} 條劃線，各生成一張卡片筆記。
@@ -495,6 +524,7 @@ class ZettelkastenLLMEnhancer:
                 chapter_reference=chapter,
                 chapter_progress=progress,
                 source_bookmark_id=str(highlight.get('bookmark_id') or ''),
+                tags=self._extract_tags(segment),
             )
         return results
 

@@ -24,6 +24,8 @@ _RICH_TEXT_LIMIT = 2000
 # rich_text property on the 卡片盒 DB that records which source highlight a card
 # came from, so we can dedup at highlight granularity (not whole-book).
 _SOURCE_ID_PROPERTY = "來源劃線ID"
+# multi_select property holding concept tags, for cross-book browsing by concept.
+_TOPIC_PROPERTY = "主題"
 
 
 class ZettelkastenCardRepository:
@@ -219,9 +221,28 @@ class ZettelkastenCardRepository:
                 "rich_text": [{"text": {"content": self._card_source_id(card)}}]
             },
         }
+        options = self._tag_options(card)
+        if options:
+            props[_TOPIC_PROPERTY] = {"multi_select": options}
         if books_page_id:
             props["來源"] = {"relation": [{"id": books_page_id}]}
         return props
+
+    @staticmethod
+    def _tag_options(card: ZettelkastenCard) -> List[dict]:
+        """Notion multi_select options from card tags.
+
+        Commas are stripped (Notion forbids them in option names) and names are
+        length-capped; empty tags are dropped.
+        """
+        options: List[dict] = []
+        seen: Set[str] = set()
+        for tag in getattr(card, "tags", None) or []:
+            name = (tag or "").replace(",", "").replace("，", "").strip()[:100]
+            if name and name not in seen:
+                seen.add(name)
+                options.append({"name": name})
+        return options
 
     def _build_children(self, card: ZettelkastenCard) -> List[dict]:
         blocks: List[dict] = []
