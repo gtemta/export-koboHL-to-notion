@@ -4,6 +4,16 @@
 > 背景：Zettelkasten 卡片產生已從 legacy 移植到 `src/`（`GenerateBookCardsUseCase` + `ZettelkastenCardRepository`），
 > 本文件記錄後續讓「匯出後的劃線內容」更好管理的改善方向，按優先順序排列。
 
+## 實作進度（2026-07-04）
+
+- ✅ #1 Annotation 匯出 — Highlight/SQL/Notion callout/選卡評分/prompt
+- ✅ #2 劃線粒度去重 — BookmarkID → `來源劃線ID` 屬性，續傳 + 增量
+- ✅ #3-1 主題標籤 — LLM 產 `【標籤】`，寫入 `主題` multi_select
+- ✅ #4 品質分數/狀態寫回 — `品質分數`/`狀態` 屬性 + 修改說明 toggle + schema guard
+- ✅ #5 產卡本地留存 — `CardStore` JSON 落地 + 上傳失敗續傳
+- ⬜ #3-2 / #3-3 卡片間橫向連結（同批 / 跨書 embedding）— 未做
+- ✅ #6 文件同步更新 — CLAUDE.md / .env.example
+
 ---
 
 ## 1. 匯出 Kobo 個人註記（Annotation）— 最高優先

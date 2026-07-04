@@ -29,19 +29,27 @@ src/
 │   └── services/chapter_extractor.py    — Strategy-based chapter name fallback
 ├── application/
 │   ├── use_cases/sync_books_use_case.py — SyncBooksUseCase.execute()
+│   ├── use_cases/generate_book_cards_use_case.py — Zettelkasten card post-sync step
 │   └── dtos/sync_result.py
 └── infrastructure/                      — Adapters for external systems
     ├── persistence/
     │   ├── kobo_sqlite_repository.py    — implements BookRepository
     │   ├── chapter_title_heuristics.py  — extract_real_chapter_title regex patterns
-    │   └── highlight_organizer.py       — progress-based chapter grouping
+    │   ├── highlight_organizer.py       — progress-based chapter grouping
+    │   └── card_store.py                — local JSON persistence / resume for cards
     ├── notion/
     │   ├── notion_api_repository.py     — implements NotionRepository
+    │   ├── zettelkasten_card_repository.py — uploads cards to 卡片盒 DB (per-highlight dedup)
     │   ├── rate_limiter.py              — thread-safe ~3 req/s limiter
-    │   └── retry_policy.py              — 409/429 exponential backoff
+    │   └── retry_policy.py              — 409/429/404 exponential backoff
     ├── external/cover_fetcher.py        — Google Books + Open Library fallback
     └── container.py                     — composition root (build_use_case)
 ```
+
+Card generation (`zettelkasten_generator.py`, still at project root) is wired in as
+an optional post-sync step: `GenerateBookCardsUseCase` bridges `Highlight` entities
+to the generator, persists the batch via `CardStore`, then uploads through
+`ZettelkastenCardRepository`. Enabled by `ENABLE_ZETTELKASTEN_CARDS=true`.
 
 ### Entry point flow
 
@@ -51,7 +59,7 @@ Inside the use case: for each book, check Notion → create if missing → fetch
 
 ### Legacy code (`legacy/`)
 
-- `legacy/uploadToNotion.py` (1070 lines): original monolithic sync. Integrates with `zettelkasten_generator.py` at root. Preserved because Zettelkasten card generation is not yet ported into `src/`.
+- `legacy/uploadToNotion.py` (1070 lines): original monolithic sync. Integrates with `zettelkasten_generator.py` at root. Card generation is now also available in `src/` (see below); this legacy entry is kept for its USB-automation glue.
 - `legacy/DBReader.py` (662 lines): original SQLite reader. Still imported by `summarize_with_gemma.py`, `tests/`, and `analysis/` scripts — those modules haven't been migrated.
 
 Run legacy via `python -m legacy.uploadToNotion` (the module adjusts `sys.path` to locate root-level siblings).
@@ -73,15 +81,27 @@ The simpler `ChapterExtractor` in `src/domain/services/` is used only as a fallb
   - `KOBO_DB_PATH`: default `KoboReader.sqlite`
   - `MAX_WORKERS`: thread pool size, default `5`
   - `LOG_LEVEL`: default `INFO`
-  - Zettelkasten vars (legacy path only): see `.env.example`
+  - Zettelkasten card generation (used by both `main.py` and the legacy path):
+    - `ENABLE_ZETTELKASTEN_CARDS`: `true`/`false` (default `false`)
+    - `NOTION_ZETTELKASTEN_DATABASE_ID`: target 卡片盒 database (required when enabled)
+    - `NOTION_BOOKS_DATABASE_ID`: Books DB the card `來源` relation points at (optional)
+    - `ZETTELKASTEN_MIN_HIGHLIGHTS` (default `10`), `ZETTELKASTEN_MAX_CARDS` (default `16`)
+    - `ZETTELKASTEN_CARDS_OUTPUT_DIR`: local card JSON dir (default `cards_output`, gitignored)
+    - Ollama + Gemini vars (`OLLAMA_*`, `GEMINI_*`): see `.env.example`
 - **KoboReader.sqlite**: Copy from Kobo device to project root (or set `KOBO_DB_PATH`)
 - **Notion database** must have: Title (text), Exported (checkbox). Optional fields: Author, Publisher, Subtitle, Description, ISBN, SpendReadingTime, LastReadDate, LastFinishedReadTime, PercentageRead.
+- **Notion 卡片盒 database** (when cards enabled): 標題 (title) is required. Optional
+  columns are written only if present (the repository reads the DB schema first):
+  `來源` (relation → Books DB), `來源劃線ID` (text, enables per-highlight dedup),
+  `主題` (multi_select concept tags), `品質分數` (number), `狀態` (select: 草稿/已審/永久筆記).
 
 ### Key Database Schema
 
 - **content table**: Book metadata (Title, Author, ISBN, reading progress)
 - **Bookmark table**: Highlights with chapter references
   - `Text`: the highlighted content
+  - `Annotation`: the reader's own handwritten note (exported as a 💭 callout)
+  - `BookmarkID`: stable id used for per-highlight card dedup
   - `ContentID`: chapter file path for extraction
   - `ChapterProgress`: reading position for sorting
 
@@ -98,4 +118,9 @@ The simpler `ChapterExtractor` in `src/domain/services/` is used only as a fallb
 - `analysis/` contains one-shot debug scripts; candidates for deletion.
 - `docs/` is full of past refactor plans (REFACTOR_PLAN.md etc.) that could be archived.
 - `summarize_with_gemma.py` still depends on legacy.DBReader — port or retire later.
-- Zettelkasten path is duplicated work waiting to be ported into `src/` as a post-sync step.
+- Zettelkasten card generation is now ported into `src/` (use case + repository +
+  card store, wired in `container.build_use_case`). `zettelkasten_generator.py`
+  still lives at project root and the `legacy/` copy remains for the legacy entry —
+  the legacy version can be retired once no longer used.
+- See `docs/ZETTELKASTEN_IMPROVEMENTS.md` for the remaining roadmap (cross-card
+  linking #3-2/#3-3 not yet done).
