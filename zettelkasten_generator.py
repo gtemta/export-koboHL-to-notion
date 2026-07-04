@@ -32,6 +32,7 @@ class ZettelkastenCard:
     chapter_progress: float           # Reading progress (0.0 - 1.0)
     quality_score: int = 0            # Quality score from Gemini review (1-10)
     revision_notes: str = ""          # Notes from Gemini review
+    source_bookmark_id: str = ""      # Kobo BookmarkID of the source highlight
     created_at: datetime = field(default_factory=datetime.now)
 
     def to_dict(self) -> Dict:
@@ -45,6 +46,7 @@ class ZettelkastenCard:
             'chapter_progress': self.chapter_progress,
             'quality_score': self.quality_score,
             'revision_notes': self.revision_notes,
+            'source_bookmark_id': self.source_bookmark_id,
             'created_at': self.created_at.isoformat()
         }
 
@@ -269,7 +271,8 @@ class ZettelkastenLLMEnhancer:
                         content=content,
                         source_highlight=text,
                         chapter_reference=chapter,
-                        chapter_progress=progress or 0.0
+                        chapter_progress=progress or 0.0,
+                        source_bookmark_id=str(highlight.get('bookmark_id') or ''),
                     )
             else:
                 elapsed = time.monotonic() - start_time
@@ -491,6 +494,7 @@ class ZettelkastenLLMEnhancer:
                 source_highlight=original,
                 chapter_reference=chapter,
                 chapter_progress=progress,
+                source_bookmark_id=str(highlight.get('bookmark_id') or ''),
             )
         return results
 

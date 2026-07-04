@@ -40,4 +40,5 @@ class GenerateBookCardsUseCase:
             "chapter_progress": h.chapter_progress,
             "current_chapter_progress": h.current_chapter_progress,
             "annotation": h.annotation,
+            "bookmark_id": h.bookmark_id,
         }

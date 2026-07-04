@@ -6,8 +6,9 @@ Schema expected (matches 🗃️ 卡片盒重點收集):
 Card content / source highlight / chapter reference go into the page body
 as blocks, since the target DB has no matching properties for them.
 """
+import hashlib
 import logging
-from typing import List, Optional
+from typing import List, Optional, Set, Tuple
 
 from notion_client import Client
 
@@ -20,6 +21,9 @@ from zettelkasten_generator import ZettelkastenCard
 logger = logging.getLogger(__name__)
 
 _RICH_TEXT_LIMIT = 2000
+# rich_text property on the 卡片盒 DB that records which source highlight a card
+# came from, so we can dedup at highlight granularity (not whole-book).
+_SOURCE_ID_PROPERTY = "來源劃線ID"
 
 
 class ZettelkastenCardRepository:
@@ -53,12 +57,26 @@ class ZettelkastenCardRepository:
                 f"Books DB 找不到 '{book_title}'，卡片會建立但不會連結「來源」"
             )
 
-        if books_page_id and self._has_existing_cards(books_page_id):
-            logger.info(f"卡片盒已有 '{book_title}' 的卡片，略過上傳")
+        done_ids, existing_count = self._existing_source_ids(books_page_id)
+        # 已有卡片、但沒有任何來源劃線ID → 卡片盒尚未加該屬性，退回「整本略過」
+        # 以免每次重跑都重複建立卡片。
+        if existing_count > 0 and not done_ids:
+            logger.info(
+                f"卡片盒已有 '{book_title}' 的卡片但無「{_SOURCE_ID_PROPERTY}」屬性，"
+                f"沿用整本略過（在卡片盒新增此 rich_text 屬性即可支援增量補卡）"
+            )
+            return 0
+
+        pending = self._filter_new_cards(cards, done_ids)
+        skipped = len(cards) - len(pending)
+        if skipped:
+            logger.info(f"'{book_title}' 已有 {skipped} 張卡片，僅需上傳 {len(pending)} 張新卡")
+        if not pending:
+            logger.info(f"'{book_title}' 無新卡片需要上傳")
             return 0
 
         success_count = 0
-        for i, card in enumerate(cards, 1):
+        for i, card in enumerate(pending, 1):
             try:
                 properties = self._build_properties(card, books_page_id)
                 children = self._build_children(card)
@@ -71,11 +89,11 @@ class ZettelkastenCardRepository:
                     self._rate_limiter,
                 )
                 success_count += 1
-                logger.info(f"建立卡片 {i}/{len(cards)}: {card.title}")
+                logger.info(f"建立卡片 {i}/{len(pending)}: {card.title}")
             except Exception as e:
                 logger.error(f"卡片 '{card.title}' 建立失敗: {e}")
 
-        logger.info(f"卡片盒同步完成: {success_count}/{len(cards)}")
+        logger.info(f"卡片盒同步完成: {success_count}/{len(pending)}")
         return success_count
 
     # ----- Internals -----
@@ -109,28 +127,97 @@ class ZettelkastenCardRepository:
                 return None
         return None
 
-    def _has_existing_cards(self, books_page_id: str) -> bool:
+    def _existing_source_ids(
+        self, books_page_id: Optional[str]
+    ) -> Tuple[Set[str], int]:
+        """Collect the source-highlight IDs already recorded for this book.
+
+        Returns (set_of_source_ids, total_existing_cards). Paginates through all
+        cards whose 來源 relation points at this book so a partially-failed prior
+        run can be resumed rather than skipped wholesale.
+        """
+        if not books_page_id:
+            return set(), 0
+
+        ids: Set[str] = set()
+        total = 0
+        cursor: Optional[str] = None
         try:
-            result = retry_with_backoff(
-                lambda: self._client.databases.query(
-                    database_id=self._database_id,
-                    filter={
+            while True:
+                kwargs = {
+                    "database_id": self._database_id,
+                    "filter": {
                         "property": "來源",
                         "relation": {"contains": books_page_id},
                     },
-                    page_size=1,
-                ),
-                self._rate_limiter,
-            )
-            return bool((result or {}).get("results"))
+                    "page_size": 100,
+                }
+                if cursor:
+                    kwargs["start_cursor"] = cursor
+                result = retry_with_backoff(
+                    lambda k=kwargs: self._client.databases.query(**k),
+                    self._rate_limiter,
+                ) or {}
+                for page in result.get("results", []):
+                    total += 1
+                    sid = self._read_source_id_property(page)
+                    if sid:
+                        ids.add(sid)
+                if not result.get("has_more"):
+                    break
+                cursor = result.get("next_cursor")
         except Exception as e:
             logger.warning(f"卡片盒去重查詢失敗 ({books_page_id}): {e}")
-            return False
+            return set(), 0
+        return ids, total
+
+    @staticmethod
+    def _read_source_id_property(page: dict) -> str:
+        props = (page or {}).get("properties", {})
+        prop = props.get(_SOURCE_ID_PROPERTY) or {}
+        rich = prop.get("rich_text") or []
+        if rich:
+            first = rich[0] or {}
+            return (first.get("plain_text")
+                    or (first.get("text") or {}).get("content")
+                    or "").strip()
+        return ""
+
+    @staticmethod
+    def _card_source_id(card: ZettelkastenCard) -> str:
+        """Stable id for the source highlight a card came from.
+
+        Prefers the Kobo BookmarkID; falls back to a hash of the highlight text
+        so cards still dedup even when no BookmarkID is available.
+        """
+        bookmark_id = getattr(card, "source_bookmark_id", "") or ""
+        if bookmark_id.strip():
+            return bookmark_id.strip()
+        basis = (card.source_highlight or card.title or "").encode("utf-8")
+        return "sha1:" + hashlib.sha1(basis).hexdigest()[:12]
+
+    @classmethod
+    def _filter_new_cards(
+        cls, cards: List[ZettelkastenCard], done_ids: Set[str]
+    ) -> List[ZettelkastenCard]:
+        """Cards whose source highlight has no card yet (also dedups within batch)."""
+        seen = set(done_ids)
+        pending: List[ZettelkastenCard] = []
+        for card in cards:
+            sid = cls._card_source_id(card)
+            if sid in seen:
+                continue
+            seen.add(sid)
+            pending.append(card)
+        return pending
 
     def _build_properties(self, card: ZettelkastenCard,
                           books_page_id: Optional[str]) -> dict:
         props: dict = {
             "標題": {"title": [{"text": {"content": card.title[:_RICH_TEXT_LIMIT]}}]},
+            _SOURCE_ID_PROPERTY: {
+                "rich_text": [{"text": {"content": self._card_source_id(card)}}]
+            },
         }
         if books_page_id:
             props["來源"] = {"relation": [{"id": books_page_id}]}
