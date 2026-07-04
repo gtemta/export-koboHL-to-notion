@@ -10,6 +10,7 @@ It uses a dual-layer LLM architecture:
 import os
 import re
 import json
+import time
 import logging
 import requests
 from dataclasses import dataclass, field
@@ -205,24 +206,50 @@ class ZettelkastenLLMEnhancer:
 
         prompt = self._build_prompt(text, book_title)
 
+        accumulated: List[str] = []
+        start_time = time.monotonic()
+        timeout_s = int(os.getenv('OLLAMA_TIMEOUT_SECONDS', '300'))
+        keep_alive = os.getenv('OLLAMA_KEEP_ALIVE', '30m')
+        num_predict = int(os.getenv('OLLAMA_NUM_PREDICT', '2000'))
+
+        logger.debug(
+            f"Ollama request → url={self.api_url} model={self.model} "
+            f"prompt_chars={len(prompt)} timeout={timeout_s}s num_predict={num_predict}"
+        )
+
         try:
             response = requests.post(
                 self.api_url,
                 json={
                     "model": self.model,
                     "prompt": prompt,
-                    "stream": False,
+                    "stream": True,
+                    "keep_alive": keep_alive,
                     "options": {
                         "temperature": 0.7,
-                        "num_predict": 500
-                    }
+                        "num_predict": num_predict,
+                    },
                 },
-                timeout=60
+                timeout=timeout_s,
+                stream=True,
             )
 
             if response.status_code == 200:
-                result = response.json()
-                generated_text = result.get("response", "")
+                for line in response.iter_lines(decode_unicode=True):
+                    if not line:
+                        continue
+                    chunk = json.loads(line)
+                    accumulated.append(chunk.get("response", ""))
+                    if chunk.get("done"):
+                        break
+
+                generated_text = "".join(accumulated)
+                elapsed = time.monotonic() - start_time
+                logger.debug(
+                    f"Ollama response ← status=200 elapsed={elapsed:.1f}s "
+                    f"chars={len(generated_text)}"
+                )
+
                 title, content = self._parse_response(generated_text, text)
 
                 if title and content:
@@ -236,14 +263,33 @@ class ZettelkastenLLMEnhancer:
                         chapter_progress=progress or 0.0
                     )
             else:
-                logger.error(f"Ollama API error: {response.status_code}")
+                elapsed = time.monotonic() - start_time
+                logger.error(
+                    f"Ollama API error: status={response.status_code} "
+                    f"elapsed={elapsed:.1f}s body={response.text[:500]}"
+                )
 
         except requests.exceptions.Timeout:
-            logger.error("Ollama API timeout")
-        except requests.exceptions.ConnectionError:
-            logger.error("Cannot connect to Ollama API. Make sure Ollama is running.")
+            elapsed = time.monotonic() - start_time
+            partial = "".join(accumulated) if accumulated else "<no bytes received>"
+            logger.error(
+                f"Ollama API timeout after {elapsed:.1f}s "
+                f"(url={self.api_url} model={self.model} prompt_chars={len(prompt)})"
+            )
+            logger.error(
+                f"Partial response before timeout ({len(partial)} chars): {partial!r}"
+            )
+        except requests.exceptions.ConnectionError as e:
+            elapsed = time.monotonic() - start_time
+            logger.error(
+                f"Cannot connect to Ollama after {elapsed:.1f}s "
+                f"(url={self.api_url}): {e}"
+            )
         except Exception as e:
-            logger.error(f"Error generating card with Ollama: {str(e)}")
+            elapsed = time.monotonic() - start_time
+            logger.exception(
+                f"Error generating card with Ollama after {elapsed:.1f}s: {e}"
+            )
 
         return None
 
@@ -269,8 +315,32 @@ class ZettelkastenLLMEnhancer:
 
 請直接輸出，不要加任何解釋："""
 
-    def _parse_response(self, response_text: str, original_text: str) -> Tuple[Optional[str], Optional[str]]:
-        """Parse the LLM response to extract title and content"""
+    _THINKING_PATTERNS = [
+        re.compile(r'(?is)^\s*Thinking\.\.\..*?\.\.\.\s*done thinking\.\s*'),
+        re.compile(r'(?is)<think>.*?</think>\s*'),
+        re.compile(r'(?is)^\s*Thinking Process\s*:.*?(?=【|標題|###|$)'),
+    ]
+
+    @classmethod
+    def _strip_thinking(cls, text: str) -> str:
+        for pat in cls._THINKING_PATTERNS:
+            text = pat.sub('', text)
+        return text
+
+    def _parse_response(
+        self,
+        response_text: str,
+        original_text: str,
+        allow_fallback: bool = True,
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """Parse the LLM response to extract title and content.
+
+        When `allow_fallback` is False, return (None, None) if the structured
+        【標題】/【內容】 markers are missing — used by batch parsing so we can
+        retry that specific card per-highlight instead of silently fabricating
+        a title from the original text.
+        """
+        response_text = self._strip_thinking(response_text)
         title = None
         content = None
 
@@ -305,6 +375,9 @@ class ZettelkastenLLMEnhancer:
                 content = re.sub(r'\n{2,}', '\n', content)
                 break
 
+        if not allow_fallback:
+            return title, content
+
         # Fallback: if no structured format, try to split by newline
         if not title or not content:
             lines = [l.strip() for l in response_text.strip().split('\n') if l.strip()]
@@ -323,15 +396,220 @@ class ZettelkastenLLMEnhancer:
 
         return title, content
 
+    def _build_batch_prompt(self, highlights: List[Dict], book_title: str = "") -> str:
+        n = len(highlights)
+        book_context = f"書名：{book_title}\n\n" if book_title else ""
+
+        highlight_blocks = []
+        for i, h in enumerate(highlights, start=1):
+            text = (h.get('text') or '').strip()
+            highlight_blocks.append(f"---\n劃線 {i}：\n{text}")
+        highlights_section = "\n".join(highlight_blocks) + "\n---"
+
+        format_lines = []
+        for i in range(1, n + 1):
+            format_lines.append(f"### CARD_{i}\n【標題】5-15個字...\n【內容】100-150個字...")
+        format_example = "\n".join(format_lines)
+
+        return f"""你是一位卡片盒筆記專家。請為以下書籍的 {n} 條劃線，各生成一張卡片筆記。
+
+{book_context}{highlights_section}
+
+請依序為每一條劃線輸出一張卡片，嚴格依照以下格式（千萬不要省略分隔符）：
+
+{format_example}
+
+規則：
+1. 每張卡的【標題】【內容】都要用繁體中文、台灣用語
+2. 內容要用自己的話重述，不要照抄原文
+3. {n} 張卡都要給，不可省略、不可合併
+4. 分隔符只用 ### CARD_編號，不要加其他註解、結語或總結
+5. 標題 5-15 個字，內容 100-150 個字
+
+請直接輸出，不要在格式外加任何解釋："""
+
+    def _parse_batch_response(
+        self,
+        response_text: str,
+        highlights: List[Dict],
+    ) -> List[Optional[ZettelkastenCard]]:
+        """Parse a batch response into N cards aligned to the input highlights.
+
+        Missing / malformed cards are returned as None at their index so the
+        caller can fall back per-highlight.
+        """
+        cleaned = self._strip_thinking(response_text)
+
+        # Split on "### CARD_<n>" and capture the index so we can align.
+        splitter = re.compile(r'###\s*CARD[_\- ]?(\d+)\s*', re.IGNORECASE)
+        parts = splitter.split(cleaned)
+        # parts = [preamble, idx1, body1, idx2, body2, ...]
+        segments: Dict[int, str] = {}
+        for i in range(1, len(parts) - 1, 2):
+            try:
+                idx = int(parts[i])
+            except ValueError:
+                continue
+            segments[idx] = parts[i + 1].strip()
+
+        results: List[Optional[ZettelkastenCard]] = [None] * len(highlights)
+        for i, highlight in enumerate(highlights, start=1):
+            segment = segments.get(i)
+            if not segment:
+                logger.warning(f"Batch parse: missing CARD_{i} in response")
+                continue
+            original = (highlight.get('text') or '').strip()
+            title, content = self._parse_response(segment, original, allow_fallback=False)
+            if not title or not content:
+                logger.warning(f"Batch parse: CARD_{i} missing title or content")
+                continue
+            chapter = highlight.get('chapter_name', 'Unknown')
+            progress = highlight.get('chapter_progress', 0.0) or 0.0
+            card_id = f"card_{datetime.now().strftime('%Y%m%d%H%M%S')}_{i:02d}_{hash(original) % 10000:04d}"
+            results[i - 1] = ZettelkastenCard(
+                id=card_id,
+                title=title,
+                content=content,
+                source_highlight=original,
+                chapter_reference=chapter,
+                chapter_progress=progress,
+            )
+        return results
+
+    def _batch_generate_single_call(
+        self,
+        highlights: List[Dict],
+        book_title: str = "",
+    ) -> List[Optional[ZettelkastenCard]]:
+        """One POST to Ollama that asks for all N cards at once."""
+        if not highlights:
+            return []
+
+        prompt = self._build_batch_prompt(highlights, book_title)
+        timeout_s = int(os.getenv('OLLAMA_BATCH_TIMEOUT_SECONDS', '600'))
+        keep_alive = os.getenv('OLLAMA_KEEP_ALIVE', '30m')
+        num_predict = int(os.getenv('OLLAMA_BATCH_NUM_PREDICT', '-1'))
+        num_ctx = int(os.getenv('OLLAMA_BATCH_NUM_CTX', '16384'))
+
+        accumulated: List[str] = []
+        start_time = time.monotonic()
+
+        logger.info(
+            f"Ollama batch request → model={self.model} highlights={len(highlights)} "
+            f"prompt_chars={len(prompt)} num_ctx={num_ctx} timeout={timeout_s}s"
+        )
+
+        try:
+            response = requests.post(
+                self.api_url,
+                json={
+                    "model": self.model,
+                    "prompt": prompt,
+                    "stream": True,
+                    "keep_alive": keep_alive,
+                    "options": {
+                        "temperature": 0.7,
+                        "num_predict": num_predict,
+                        "num_ctx": num_ctx,
+                    },
+                },
+                timeout=timeout_s,
+                stream=True,
+            )
+
+            if response.status_code != 200:
+                elapsed = time.monotonic() - start_time
+                logger.error(
+                    f"Ollama batch error: status={response.status_code} "
+                    f"elapsed={elapsed:.1f}s body={response.text[:500]}"
+                )
+                return [None] * len(highlights)
+
+            for line in response.iter_lines(decode_unicode=True):
+                if not line:
+                    continue
+                chunk = json.loads(line)
+                accumulated.append(chunk.get("response", ""))
+                if chunk.get("done"):
+                    break
+
+            generated_text = "".join(accumulated)
+            elapsed = time.monotonic() - start_time
+            logger.info(
+                f"Ollama batch response ← elapsed={elapsed:.1f}s "
+                f"chars={len(generated_text)}"
+            )
+            return self._parse_batch_response(generated_text, highlights)
+
+        except requests.exceptions.Timeout:
+            elapsed = time.monotonic() - start_time
+            partial = "".join(accumulated) if accumulated else "<no bytes received>"
+            logger.error(
+                f"Ollama batch timeout after {elapsed:.1f}s "
+                f"(highlights={len(highlights)} prompt_chars={len(prompt)})"
+            )
+            logger.error(f"Partial response before timeout ({len(partial)} chars): {partial[:500]!r}")
+            # Try to salvage whatever cards made it through before timeout.
+            if accumulated:
+                return self._parse_batch_response("".join(accumulated), highlights)
+            return [None] * len(highlights)
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"Cannot connect to Ollama for batch: {e}")
+            return [None] * len(highlights)
+        except Exception as e:
+            logger.exception(f"Error in batch generation: {e}")
+            return [None] * len(highlights)
+
     def batch_generate(self, highlights: List[Dict], book_title: str = "") -> List[ZettelkastenCard]:
-        """Generate cards for multiple highlights"""
-        cards = []
-        for i, highlight in enumerate(highlights):
-            logger.info(f"Generating card {i+1}/{len(highlights)}...")
-            card = self.generate_card(highlight, book_title)
-            if card:
-                cards.append(card)
-        return cards
+        """Generate cards for multiple highlights via a single batched Ollama call.
+
+        Strategy:
+        1. If estimated tokens exceed context, split the batch in half and recurse.
+        2. Issue one POST that asks the model for all N cards.
+        3. Any card that came back missing or malformed is retried per-highlight.
+        """
+        if not highlights:
+            return []
+
+        num_ctx = int(os.getenv('OLLAMA_BATCH_NUM_CTX', '16384'))
+        # Rough estimate: Chinese ~1.5 tokens/char, plus per-card thinking + output budget.
+        input_chars = sum(len((h.get('text') or '')) for h in highlights) + len(book_title)
+        est_input_tokens = int(input_chars * 1.5) + 600  # prompt overhead
+        est_output_tokens = len(highlights) * 600 + 1500  # cards + thinking buffer
+        est_total = est_input_tokens + est_output_tokens
+
+        if est_total > num_ctx and len(highlights) > 1:
+            mid = len(highlights) // 2
+            logger.warning(
+                f"batch_generate: estimated {est_total} tokens exceeds num_ctx={num_ctx}, "
+                f"splitting {len(highlights)} → {mid} + {len(highlights) - mid}"
+            )
+            left = self.batch_generate(highlights[:mid], book_title)
+            right = self.batch_generate(highlights[mid:], book_title)
+            return left + right
+
+        logger.info(
+            f"batch_generate: {len(highlights)} highlights, "
+            f"est_tokens~{est_total} / num_ctx={num_ctx}"
+        )
+
+        cards = self._batch_generate_single_call(highlights, book_title)
+
+        missing_indices = [i for i, c in enumerate(cards) if c is None]
+        if missing_indices:
+            logger.warning(
+                f"Batch produced {len(cards) - len(missing_indices)}/{len(cards)} cards; "
+                f"retrying {len(missing_indices)} per-highlight"
+            )
+            for i in missing_indices:
+                logger.info(f"Per-highlight fallback for card {i + 1}/{len(highlights)}...")
+                card = self.generate_card(highlights[i], book_title)
+                if card:
+                    cards[i] = card
+
+        produced = [c for c in cards if c is not None]
+        logger.info(f"batch_generate done: {len(produced)}/{len(highlights)} cards produced")
+        return produced
 
 
 class GeminiReviewer:

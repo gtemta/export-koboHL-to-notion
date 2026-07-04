@@ -3,10 +3,12 @@ import logging
 import os
 from logging.handlers import RotatingFileHandler
 
+from ..application.use_cases.generate_book_cards_use_case import GenerateBookCardsUseCase
 from ..application.use_cases.sync_books_use_case import SyncBooksUseCase
 from ..config.settings import Settings
 from ..domain.services.chapter_extractor import ChapterExtractor
 from .notion.notion_api_repository import NotionApiRepository
+from .notion.zettelkasten_card_repository import ZettelkastenCardRepository
 from .persistence.kobo_sqlite_repository import KoboSqliteRepository
 
 
@@ -17,12 +19,37 @@ def build_use_case(settings: Settings) -> SyncBooksUseCase:
         database_id=settings.notion_database_id,
     )
     extractor = ChapterExtractor()
+    card_use_case = _build_card_use_case(settings)
     return SyncBooksUseCase(
         book_repo=book_repo,
         notion_repo=notion_repo,
         chapter_extractor=extractor,
         max_workers=settings.max_workers,
+        card_use_case=card_use_case,
     )
+
+
+def _build_card_use_case(settings: Settings):
+    if not settings.enable_zettelkasten_cards:
+        return None
+    if not settings.notion_zettelkasten_database_id:
+        logging.getLogger(__name__).warning(
+            "ENABLE_ZETTELKASTEN_CARDS=true 但 NOTION_ZETTELKASTEN_DATABASE_ID 未設定，跳過卡片功能"
+        )
+        return None
+
+    from zettelkasten_generator import ZettelkastenCardGenerator
+
+    generator = ZettelkastenCardGenerator(
+        max_cards=settings.zettelkasten_max_cards,
+        min_highlights=settings.zettelkasten_min_highlights,
+    )
+    card_repo = ZettelkastenCardRepository(
+        token=settings.notion_token,
+        database_id=settings.notion_zettelkasten_database_id,
+        books_database_id=settings.notion_books_database_id,
+    )
+    return GenerateBookCardsUseCase(generator=generator, card_repo=card_repo)
 
 
 def setup_file_and_console_logging(level: str = "INFO") -> logging.Logger:

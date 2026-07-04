@@ -1,25 +1,28 @@
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List
+from typing import List, Optional
 
-from ...domain.repositories.book_repository import BookRepository  
+from ...domain.repositories.book_repository import BookRepository
 from ...domain.repositories.notion_repository import NotionRepository
 from ...domain.services.chapter_extractor import ChapterExtractor
 from ..dtos.sync_result import SyncResult
+from .generate_book_cards_use_case import GenerateBookCardsUseCase
 
 
 class SyncBooksUseCase:
     """同步書籍用例"""
-    
-    def __init__(self, 
+
+    def __init__(self,
                  book_repo: BookRepository,
                  notion_repo: NotionRepository,
                  chapter_extractor: ChapterExtractor,
-                 max_workers: int = 5):
+                 max_workers: int = 5,
+                 card_use_case: Optional[GenerateBookCardsUseCase] = None):
         self.book_repo = book_repo
         self.notion_repo = notion_repo
         self.chapter_extractor = chapter_extractor
         self.max_workers = max_workers
+        self.card_use_case = card_use_case
         self.logger = logging.getLogger(__name__)
     
     def execute(self) -> SyncResult:
@@ -73,6 +76,10 @@ class SyncBooksUseCase:
                 page_id = book_status["pageId"]
                 self.notion_repo.update_book_metadata(page_id, book)
                 self.notion_repo.add_book_cover(page_id, book.title, book.isbn)
+                # 補齊卡片：若卡片盒尚無此書關聯卡片，repo 內 dedup 會控制是否實際新增
+                if self.card_use_case is not None:
+                    highlights = self.book_repo.get_highlights_with_chapters(book.id)
+                    self.card_use_case.execute(book, highlights)
                 return True
             
             # 檢查書籍是否存在但未導出
@@ -110,7 +117,11 @@ class SyncBooksUseCase:
             
             # 同步高亮內容到Notion
             self.notion_repo.sync_book_highlights(page_id, highlights)
-            
+
+            # 產生 Zettelkasten 卡片並上傳卡片盒（若已啟用）
+            if self.card_use_case is not None:
+                self.card_use_case.execute(book, highlights)
+
             # 更新書籍元數據
             self.notion_repo.update_book_metadata(page_id, book)
             

@@ -35,6 +35,10 @@ def retry_with_backoff(
                 logger.warning(f"409 衝突，第 {attempt + 1} 次重試，等待 {delay}s")
                 time.sleep(delay)
                 delay *= 2
+            elif "404" in err and attempt < max_retries - 1:
+                logger.warning(f"Notion 404 (資料來源暫時無法解析)，第 {attempt + 1} 次重試，等待 {delay}s")
+                time.sleep(delay)
+                delay *= 2
             else:
                 logger.error(f"Notion API 錯誤 ({attempt + 1}/{max_retries}): {err}")
                 raise
