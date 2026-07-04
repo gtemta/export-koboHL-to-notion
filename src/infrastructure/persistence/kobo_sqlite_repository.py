@@ -31,7 +31,7 @@ _HIGHLIGHT_QUERY = (
     "SELECT Bookmark.Text, Bookmark.ContentID, Bookmark.ChapterProgress, "
     "Bookmark.StartContainerPath, Bookmark.EndContainerPath, "
     "content.ChapterIDBookmarked, content.CurrentChapterEstimate, "
-    "content.CurrentChapterProgress "
+    "content.CurrentChapterProgress, Bookmark.Annotation "
     "FROM Bookmark "
     "INNER JOIN content ON Bookmark.VolumeID = content.ContentID "
     "WHERE Bookmark.VolumeID = ? "
@@ -86,7 +86,8 @@ class KoboSqliteRepository(BookRepository):
             with self._connect() as conn:
                 for row in conn.execute(_HIGHLIGHT_QUERY, (book_id,)).fetchall():
                     (text, content_id, chapter_progress, start_path, end_path,
-                     chapter_id_bookmarked, cur_chapter_est, cur_chapter_prog) = row
+                     chapter_id_bookmarked, cur_chapter_est, cur_chapter_prog,
+                     annotation) = row
                     raw.append(Highlight(
                         text=text or '',
                         chapter_name=self._initial_chapter_name(
@@ -98,6 +99,7 @@ class KoboSqliteRepository(BookRepository):
                         chapter_id_bookmarked=chapter_id_bookmarked,
                         current_chapter_estimate=cur_chapter_est,
                         current_chapter_progress=cur_chapter_prog,
+                        annotation=annotation,
                     ))
         except sqlite3.Error as e:
             logger.error(f"讀取書籍 {book_id} 的高亮失敗: {e}", exc_info=True)

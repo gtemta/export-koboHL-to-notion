@@ -117,6 +117,7 @@ class CardSelectionAlgorithm:
         Calculate importance score for a highlight.
 
         Scoring weights:
+        - Reader wrote an annotation: +5 points (strongest importance signal)
         - Ideal length (80-200 chars): +3 points
         - Chapter start/end position: +1.5 points
         - Contains importance keywords: +0.5 points per keyword (max 2)
@@ -125,6 +126,13 @@ class CardSelectionAlgorithm:
         score = 0.0
         text = highlight.get('text', '').strip()
         text_len = len(text)
+
+        # A reader-written annotation is the strongest signal that this
+        # highlight mattered to them — weight it heavily so it (almost) always
+        # makes the cut.
+        annotation = highlight.get('annotation')
+        if annotation and annotation.strip():
+            score += 5.0
 
         # Length scoring
         if 80 <= text_len <= 200:
@@ -200,11 +208,12 @@ class ZettelkastenLLMEnhancer:
         text = highlight.get('text', '').strip()
         chapter = highlight.get('chapter_name', 'Unknown')
         progress = highlight.get('chapter_progress', 0.0)
+        annotation = (highlight.get('annotation') or '').strip()
 
         if not text:
             return None
 
-        prompt = self._build_prompt(text, book_title)
+        prompt = self._build_prompt(text, book_title, annotation)
 
         accumulated: List[str] = []
         start_time = time.monotonic()
@@ -293,15 +302,20 @@ class ZettelkastenLLMEnhancer:
 
         return None
 
-    def _build_prompt(self, highlight_text: str, book_title: str = "") -> str:
+    def _build_prompt(self, highlight_text: str, book_title: str = "",
+                      annotation: str = "") -> str:
         """Build the prompt for card generation"""
         book_context = f"書名：{book_title}\n" if book_title else ""
+        annotation_context = (
+            f"\n讀者的個人註記（請務必納入這個觀點）：\n{annotation}\n"
+            if annotation and annotation.strip() else ""
+        )
 
         return f"""你是一位卡片盒筆記專家。請為以下書籍劃線生成一張卡片筆記。
 
 {book_context}劃線內容：
 {highlight_text}
-
+{annotation_context}
 請生成卡片筆記，格式如下：
 【標題】5-15個字，概括這段話的核心概念
 【內容】100-150個字，用你自己的話重新闡述這個觀點的關鍵洞見，要確保這是一個完整、獨立的原子筆記
@@ -403,7 +417,11 @@ class ZettelkastenLLMEnhancer:
         highlight_blocks = []
         for i, h in enumerate(highlights, start=1):
             text = (h.get('text') or '').strip()
-            highlight_blocks.append(f"---\n劃線 {i}：\n{text}")
+            annotation = (h.get('annotation') or '').strip()
+            block = f"---\n劃線 {i}：\n{text}"
+            if annotation:
+                block += f"\n（讀者註記，請納入觀點）：{annotation}"
+            highlight_blocks.append(block)
         highlights_section = "\n".join(highlight_blocks) + "\n---"
 
         format_lines = []

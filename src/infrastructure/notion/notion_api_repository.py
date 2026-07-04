@@ -74,8 +74,7 @@ class NotionApiRepository(NotionRepository):
 
             blocks.append(self._heading_block(f"📖 {display_name}", level=1))
             for h in group:
-                if h.text:
-                    blocks.append(self._bulleted_block(h.text))
+                blocks.extend(self._highlight_blocks(h))
             blocks.append({"object": "block", "type": "divider", "divider": {}})
 
             if len(blocks) > _BATCH_SIZE:
@@ -247,6 +246,28 @@ class NotionApiRepository(NotionRepository):
             "object": "block",
             "type": key,
             key: {"rich_text": [{"type": "text", "text": {"content": text}}]},
+        }
+
+    @classmethod
+    def _highlight_blocks(cls, h: Highlight) -> List[Dict[str, Any]]:
+        """Blocks for a single highlight: the highlighted text as a bullet,
+        plus a 💭 callout for the reader's own annotation if present."""
+        blocks: List[Dict[str, Any]] = []
+        if h.text:
+            blocks.append(cls._bulleted_block(h.text))
+        if h.has_annotation():
+            blocks.append(cls._annotation_callout(h.annotation.strip()))
+        return blocks
+
+    @staticmethod
+    def _annotation_callout(text: str) -> Dict[str, Any]:
+        return {
+            "object": "block",
+            "type": "callout",
+            "callout": {
+                "icon": {"type": "emoji", "emoji": "💭"},
+                "rich_text": [{"type": "text", "text": {"content": text[:2000]}}],
+            },
         }
 
     @staticmethod
