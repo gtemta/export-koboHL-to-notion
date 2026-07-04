@@ -9,6 +9,7 @@ from ..config.settings import Settings
 from ..domain.services.chapter_extractor import ChapterExtractor
 from .notion.notion_api_repository import NotionApiRepository
 from .notion.zettelkasten_card_repository import ZettelkastenCardRepository
+from .persistence.card_store import CardStore
 from .persistence.kobo_sqlite_repository import KoboSqliteRepository
 
 
@@ -49,7 +50,10 @@ def _build_card_use_case(settings: Settings):
         database_id=settings.notion_zettelkasten_database_id,
         books_database_id=settings.notion_books_database_id,
     )
-    return GenerateBookCardsUseCase(generator=generator, card_repo=card_repo)
+    card_store = CardStore(output_dir=settings.zettelkasten_cards_output_dir)
+    return GenerateBookCardsUseCase(
+        generator=generator, card_repo=card_repo, card_store=card_store
+    )
 
 
 def setup_file_and_console_logging(level: str = "INFO") -> logging.Logger:

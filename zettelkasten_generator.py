@@ -52,6 +52,28 @@ class ZettelkastenCard:
             'created_at': self.created_at.isoformat()
         }
 
+    @classmethod
+    def from_dict(cls, d: Dict) -> 'ZettelkastenCard':
+        """Rebuild a card from a to_dict() payload (for local persistence/resume)."""
+        raw_created = d.get('created_at')
+        try:
+            created_at = datetime.fromisoformat(raw_created) if raw_created else datetime.now()
+        except (TypeError, ValueError):
+            created_at = datetime.now()
+        return cls(
+            id=d.get('id', ''),
+            title=d.get('title', ''),
+            content=d.get('content', ''),
+            source_highlight=d.get('source_highlight', ''),
+            chapter_reference=d.get('chapter_reference', ''),
+            chapter_progress=d.get('chapter_progress', 0.0) or 0.0,
+            quality_score=d.get('quality_score', 0) or 0,
+            revision_notes=d.get('revision_notes', '') or '',
+            source_bookmark_id=d.get('source_bookmark_id', '') or '',
+            tags=list(d.get('tags') or []),
+            created_at=created_at,
+        )
+
 
 class CardSelectionAlgorithm:
     """Algorithm for selecting the most valuable highlights for card generation"""
