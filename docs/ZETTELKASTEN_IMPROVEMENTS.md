@@ -1,5 +1,8 @@
 # Zettelkasten / 劃線知識管理改善計畫
 
+> ⏭️ 後續計畫：Notion 輸出結構 review 後的修正（Tags/Key Word/來源 relation、劃線頁改版等）
+> 記錄在 [`NOTION_OUTPUT_IMPROVEMENTS.md`](NOTION_OUTPUT_IMPROVEMENTS.md)。
+
 > 記錄日期：2026-07-04
 > 背景：Zettelkasten 卡片產生已從 legacy 移植到 `src/`（`GenerateBookCardsUseCase` + `ZettelkastenCardRepository`），
 > 本文件記錄後續讓「匯出後的劃線內容」更好管理的改善方向，按優先順序排列。
