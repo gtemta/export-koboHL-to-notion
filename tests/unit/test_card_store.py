@@ -3,11 +3,11 @@ import shutil
 import tempfile
 import unittest
 
-from zettelkasten_generator import ZettelkastenCard
-from src.infrastructure.persistence.card_store import CardStore
 from src.application.use_cases.generate_book_cards_use_case import (
     GenerateBookCardsUseCase,
 )
+from src.infrastructure.persistence.card_store import CardStore
+from zettelkasten_generator import ZettelkastenCard
 
 
 def _card(title="卡片", bookmark_id="BM-1"):

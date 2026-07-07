@@ -1,0 +1,23 @@
+# 最小 CI：lint + unit tests（見 CLAUDE.md Engineering Standards §1）
+# Python 版本跟隨本地開發環境 (3.8)；3.8 只在 ubuntu-22.04 runner 提供。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.8"
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Lint
+        run: ruff check .
+      - name: Unit tests
+        run: python -m pytest tests -q

@@ -6,7 +6,6 @@ confidence-score thresholds come from empirical tuning against the user's librar
 import re
 from typing import Optional
 
-
 _CHAPTER_KEYWORDS = ('序', '前言', '導讀', '引言', '結語', '後記', '附錄', '目錄')
 _COUNTRY_KEYWORDS = ('美國', '中國', '日本', '台灣', '韓國', '強項', '優勢', '特色')
 _ACTION_KEYWORDS_RE = re.compile(r'^[對抗|防護|掌握|學會|了解|認識|建立].+[：:]')

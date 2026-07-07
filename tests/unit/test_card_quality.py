@@ -1,15 +1,15 @@
 """Tests for quality score / status / revision-note write-back — improvement #4."""
 import unittest
 
-from zettelkasten_generator import ZettelkastenCard
 from src.infrastructure.notion.zettelkasten_card_repository import (
-    ZettelkastenCardRepository,
     _QUALITY_PROPERTY,
-    _STATUS_PROPERTY,
-    _STATUS_DRAFT,
-    _STATUS_REVIEWED,
     _SOURCE_ID_PROPERTY,
+    _STATUS_DRAFT,
+    _STATUS_PROPERTY,
+    _STATUS_REVIEWED,
+    ZettelkastenCardRepository,
 )
+from zettelkasten_generator import ZettelkastenCard
 
 
 def _card(quality_score=0, revision_notes="", title="t"):

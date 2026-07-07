@@ -1,10 +1,11 @@
-import os
-from legacy import DBReader
 import logging
+import os
 from logging.handlers import RotatingFileHandler
+
 import requests
-import json
-from typing import Dict, List
+
+from legacy import DBReader
+
 
 # 设置日志配置
 def setup_logger():

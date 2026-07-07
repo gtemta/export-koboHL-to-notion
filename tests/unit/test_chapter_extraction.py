@@ -1,9 +1,10 @@
 import unittest
+
 from src.domain.services.chapter_extractor import (
-    ChapterExtractor, 
-    TextContentExtractor, 
+    ChapterExtractor,
+    ContainerPathExtractor,
     ContentIdExtractor,
-    ContainerPathExtractor
+    TextContentExtractor,
 )
 
 

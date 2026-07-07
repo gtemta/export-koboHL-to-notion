@@ -1,0 +1,16 @@
+# 工具設定集中地（見 CLAUDE.md Engineering Standards §1）
+# 本專案不作為套件發佈，此檔只承載 ruff / pytest 設定。
+
+[tool.ruff]
+target-version = "py38"
+line-length = 100
+# legacy/ 與 analysis/ 是待退役的舊碼，不納入 lint（見 Known Cleanup Debt）
+extend-exclude = ["legacy", "analysis"]
+
+[tool.ruff.lint]
+# 預設 E4/E7/E9/F 之上加 I（import 排序）；先求穩不求嚴，之後可漸進收緊
+extend-select = ["I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

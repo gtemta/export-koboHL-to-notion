@@ -1,11 +1,11 @@
 """Tests for highlight-granularity card dedup — improvement #2."""
 import unittest
 
-from zettelkasten_generator import ZettelkastenCard
 from src.infrastructure.notion.zettelkasten_card_repository import (
-    ZettelkastenCardRepository,
     _SOURCE_ID_PROPERTY,
+    ZettelkastenCardRepository,
 )
+from zettelkasten_generator import ZettelkastenCard
 
 
 def _card(title="卡片", highlight="來源劃線文字", bookmark_id=""):

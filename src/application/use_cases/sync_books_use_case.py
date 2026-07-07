@@ -1,6 +1,6 @@
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Optional
+from typing import Optional
 
 from ...domain.repositories.book_repository import BookRepository
 from ...domain.repositories.notion_repository import NotionRepository

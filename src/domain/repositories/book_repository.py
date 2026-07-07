@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import List
+
 from ..entities.book import Book
 from ..entities.highlight import Highlight
 

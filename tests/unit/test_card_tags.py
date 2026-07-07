@@ -1,11 +1,11 @@
 """Tests for concept tags on cards — improvement #3-1."""
 import unittest
 
-from zettelkasten_generator import ZettelkastenLLMEnhancer, ZettelkastenCard
 from src.infrastructure.notion.zettelkasten_card_repository import (
-    ZettelkastenCardRepository,
     _TOPIC_PROPERTY,
+    ZettelkastenCardRepository,
 )
+from zettelkasten_generator import ZettelkastenCard, ZettelkastenLLMEnhancer
 
 
 class TestExtractTags(unittest.TestCase):

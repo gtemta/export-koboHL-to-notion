@@ -1,10 +1,12 @@
+import logging
 import os
 import shutil
 import subprocess
 import threading
 import time
-import logging
+
 import main as notion_sync
+
 try:
     import win32file
 except ImportError as e:

@@ -1,0 +1,4 @@
+# 開發依賴（lint + test；設定集中在 pyproject.toml）
+pytest==7.4.0
+pytest-cov==5.0.0
+ruff==0.15.20

@@ -12,11 +12,11 @@ from typing import List, Optional, Set, Tuple
 
 from notion_client import Client
 
-from .rate_limiter import NotionRateLimiter
-from .retry_policy import retry_with_backoff
-
 # zettelkasten_generator lives at project root (not yet ported into src/)
 from zettelkasten_generator import ZettelkastenCard
+
+from .rate_limiter import NotionRateLimiter
+from .retry_policy import retry_with_backoff
 
 logger = logging.getLogger(__name__)
 

@@ -7,15 +7,16 @@ It uses a dual-layer LLM architecture:
 - Gemini API for quality review and refinement
 """
 
+import json
+import logging
 import os
 import re
-import json
 import time
-import logging
-import requests
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Tuple
 from datetime import datetime
+from typing import Dict, List, Optional, Tuple
+
+import requests
 
 # Setup logger
 logger = logging.getLogger('kobo_notion_sync')
@@ -424,7 +425,7 @@ class ZettelkastenLLMEnhancer:
 
         # Fallback: if no structured format, try to split by newline
         if not title or not content:
-            lines = [l.strip() for l in response_text.strip().split('\n') if l.strip()]
+            lines = [ln.strip() for ln in response_text.strip().split('\n') if ln.strip()]
             if len(lines) >= 2:
                 if not title:
                     title = lines[0][:50]
@@ -911,7 +912,7 @@ def check_ollama_availability() -> bool:
     try:
         response = requests.get(api_url.replace('/api/generate', '/api/tags'), timeout=5)
         return response.status_code == 200
-    except:
+    except requests.RequestException:
         return False
 
 
