@@ -11,8 +11,39 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Zettelkasten flow**: `python -m legacy.uploadToNotion`
 - **USB auto-sync**: `python checkUSBandUpload.py` (delegates to `main.main()`)
 
-### No standard linting/testing tools are configured in this project.
-(Tests in `tests/` are in mixed state — see Project Architecture below.)
+### Quality gates
+- **Lint**: `python -m ruff check .` (config in `pyproject.toml`; `legacy/` + `analysis/` excluded)
+- **Tests**: `python -m pytest` (all green, no external resources needed)
+- **Dry-run verify**: `DRY_RUN=true python main.py` — full flow, reads only, writes logged as `[DRY RUN]`
+- CI (`.github/workflows/ci.yml`) runs ruff + pytest on every push/PR.
+
+## Engineering Standards（開發基礎規範）
+
+所有開發（人或 AI agent）必須遵守本節。守門靠自動化與文件，不靠模型的聰明程度或當下記憶。
+
+### 1. 硬基礎（一次性建設，已完成 2026-07-07）
+
+- [x] `pyproject.toml` 集中工具設定：`ruff`（lint）＋ `pytest`。（`src/domain/` 型別檢查可日後漸進加上。）
+- [x] 依賴鎖定：`requirements.txt`（執行）＋ `requirements-dev.txt`（pytest、ruff）。Ollama/Gemini 皆用 `requests` 直打 REST，無額外 SDK 依賴。
+- [x] GitHub Actions 最小 CI：`ruff check` ＋ `pytest tests`（`.github/workflows/ci.yml`）。
+- **不准留「已知是壞的」測試**：壞掉的測試要嘛修、要嘛刪。紅燈常駐會讓人和 AI 都學會忽略紅燈，比沒測試更糟。
+- 秘密與資料檔邊界：`.env`、`KoboReader.sqlite`、`cards_output/`、`logs/` 永不進版控；`.env.example` 是唯一進版控的設定樣板。
+
+### 2. Definition of Done（每次改動，四條同時滿足才算完成）
+
+1. **分支開工**：`main` 永遠可跑，改動走 feature branch。
+2. **domain 層改動必附單元測試**；infrastructure 層（Notion API）不強求測試，但改動需可用 dry-run 驗證：`DRY_RUN=true python main.py` 讀取照常、寫入只印 log（`DryRunNotionRepository`），卡片流程整個跳過（避免打 Ollama 及汙染 `cards_output/` 續傳狀態）。
+3. **跑過真實流程再收工**：不是「測試過了」，而是 `python main.py` 對至少一本書實際跑通、在 Notion 上看到預期結果。
+4. **Commit 慣例**：gitmoji + type（維持現有風格），一個 commit 一個意圖。
+
+### 3. Loop Engineer 規範（與 AI 協作的迭代紀律)
+
+1. **一圈一意圖**：每個 session 只推進一件事。任務必須有可驗證的結束條件（「上傳後 Notion 欄位 X 有值」），沒有結束條件的任務不開工。
+2. **以觀察收尾，不以宣稱收尾**：AI 說「完成了」不算數；每圈結束前必須有可觀察證據 — 測試輸出、實際執行 log、Notion 上的真實頁面。
+3. **每圈更新地圖**：架構或慣例改變時，同一圈內更新 CLAUDE.md，不留到「之後整理」。CLAUDE.md 是下一個 session 的全部世界觀，過期等於下一圈從錯誤地圖出發。
+4. **計畫文件有生命週期**：`docs/*_PLAN.md` 執行完 48 小時內，有價值的決策濃縮進 CLAUDE.md 或 `docs/DECISIONS.md`（輕量 ADR：日期／決定了什麼／為什麼），其餘刪除。一次性 SUMMARY 文件同樣適用——過期文件會污染未來 AI 的檢索。
+5. **技術債登記制**：新增債務必登記在下方 Known Cleanup Debt；每完成幾個功能就消一筆。債只進不出，AI 每次修改的成本會單調上升。
+6. **換模型不換規範**：所有規則活在 repo 裡（本節、pyproject、CI、DECISIONS.md），不活在任何模型的記憶或單次對話裡。規範的目標是讓較弱的模型也能安全做事。
 
 ## Project Architecture
 
@@ -39,6 +70,7 @@ src/
     │   └── card_store.py                — local JSON persistence / resume for cards
     ├── notion/
     │   ├── notion_api_repository.py     — implements NotionRepository
+    │   ├── dry_run_notion_repository.py — DRY_RUN decorator: reads delegate, writes log-only
     │   ├── zettelkasten_card_repository.py — uploads cards to 卡片盒 DB (per-highlight dedup)
     │   ├── rate_limiter.py              — thread-safe ~3 req/s limiter
     │   └── retry_policy.py              — 409/429/404 exponential backoff
@@ -81,6 +113,7 @@ The simpler `ChapterExtractor` in `src/domain/services/` is used only as a fallb
   - `KOBO_DB_PATH`: default `KoboReader.sqlite`
   - `MAX_WORKERS`: thread pool size, default `5`
   - `LOG_LEVEL`: default `INFO`
+  - `DRY_RUN`: `true` = reads as normal, Notion writes logged only, card flow skipped (default `false`)
   - Zettelkasten card generation (used by both `main.py` and the legacy path):
     - `ENABLE_ZETTELKASTEN_CARDS`: `true`/`false` (default `false`)
     - `NOTION_ZETTELKASTEN_DATABASE_ID`: target 卡片盒 database (required when enabled)
@@ -114,8 +147,8 @@ The simpler `ChapterExtractor` in `src/domain/services/` is used only as a fallb
 
 ### Known Cleanup Debt
 
-- `tests/` has a duplicated `test_chapter_extraction.py` (both root-level and `tests/unit/`). They import `legacy.DBReader` via old paths and are partially broken.
-- `analysis/` contains one-shot debug scripts; candidates for deletion.
+- `tests/` still has overlapping `test_chapter_extraction.py` at root-level and in `tests/unit/` (both green and importing `src.*` since d998391) — merge into one. `tests/integration/` is empty.
+- `analysis/` contains one-shot debug scripts; candidates for deletion. (Excluded from ruff along with `legacy/`.)
 - `docs/` is full of past refactor plans (REFACTOR_PLAN.md etc.) that could be archived.
 - `summarize_with_gemma.py` still depends on legacy.DBReader — port or retire later.
 - Zettelkasten card generation is now ported into `src/` (use case + repository +
