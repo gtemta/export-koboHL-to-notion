@@ -7,6 +7,7 @@ from ..application.use_cases.generate_book_cards_use_case import GenerateBookCar
 from ..application.use_cases.sync_books_use_case import SyncBooksUseCase
 from ..config.settings import Settings
 from ..domain.services.chapter_extractor import ChapterExtractor
+from .notion.dry_run_notion_repository import DryRunNotionRepository
 from .notion.notion_api_repository import NotionApiRepository
 from .notion.zettelkasten_card_repository import ZettelkastenCardRepository
 from .persistence.card_store import CardStore
@@ -14,13 +15,23 @@ from .persistence.kobo_sqlite_repository import KoboSqliteRepository
 
 
 def build_use_case(settings: Settings) -> SyncBooksUseCase:
+    logger = logging.getLogger(__name__)
     book_repo = KoboSqliteRepository(db_path=settings.kobo_db_path)
     notion_repo = NotionApiRepository(
         token=settings.notion_token,
         database_id=settings.notion_database_id,
     )
+    if settings.dry_run:
+        logger.warning("=== DRY RUN 模式：只讀取與記錄，不會寫入 Notion ===")
+        notion_repo = DryRunNotionRepository(notion_repo)
     extractor = ChapterExtractor()
-    card_use_case = _build_card_use_case(settings)
+    if settings.dry_run:
+        # 卡片流程會呼叫 Ollama 並改寫 cards_output/ 的續傳狀態，dry-run 一律跳過
+        if settings.enable_zettelkasten_cards:
+            logger.warning("DRY RUN 模式：跳過 Zettelkasten 卡片產生與上傳")
+        card_use_case = None
+    else:
+        card_use_case = _build_card_use_case(settings)
     return SyncBooksUseCase(
         book_repo=book_repo,
         notion_repo=notion_repo,

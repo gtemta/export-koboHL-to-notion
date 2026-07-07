@@ -1,7 +1,8 @@
-import os
 import logging
+import os
 from dataclasses import dataclass
 from typing import Optional
+
 from dotenv import load_dotenv
 
 
@@ -14,6 +15,7 @@ class Settings:
     max_workers: int = 5
     batch_size: int = 90
     log_level: str = "INFO"
+    dry_run: bool = False
     enable_zettelkasten_cards: bool = False
     notion_zettelkasten_database_id: Optional[str] = None
     notion_books_database_id: Optional[str] = None
@@ -41,6 +43,7 @@ class Settings:
             max_workers=int(os.getenv("MAX_WORKERS", "5")),
             batch_size=int(os.getenv("BATCH_SIZE", "90")),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
+            dry_run=os.getenv("DRY_RUN", "false").lower() == "true",
             enable_zettelkasten_cards=os.getenv("ENABLE_ZETTELKASTEN_CARDS", "false").lower() == "true",
             notion_zettelkasten_database_id=os.getenv("NOTION_ZETTELKASTEN_DATABASE_ID"),
             notion_books_database_id=os.getenv("NOTION_BOOKS_DATABASE_ID"),
