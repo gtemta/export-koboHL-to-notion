@@ -32,12 +32,18 @@ def build_use_case(settings: Settings) -> SyncBooksUseCase:
         card_use_case = None
     else:
         card_use_case = _build_card_use_case(settings)
+    if settings.resync_highlights:
+        logger.warning(
+            f"RESYNC_HIGHLIGHTS 啟用：{settings.resync_highlights} — "
+            "符合的已匯出書籍會重建劃線內容"
+        )
     return SyncBooksUseCase(
         book_repo=book_repo,
         notion_repo=notion_repo,
         chapter_extractor=extractor,
         max_workers=settings.max_workers,
         card_use_case=card_use_case,
+        should_resync=settings.resync_matches,
     )
 
 

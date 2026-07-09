@@ -50,6 +50,14 @@ class DryRunNotionRepository(NotionRepository):
             f"到 page {page_id}，並勾選 Exported"
         )
 
+    def replace_book_highlights(self, page_id: str, highlights: List[Highlight]) -> None:
+        chapters = {h.chapter_name or "未知章節" for h in highlights}
+        logger.info(
+            f"{_PREFIX} 將刪除 page {page_id} 上同步產生的 block"
+            f"（heading/bullet/callout/divider），並重建 {len(highlights)} 個劃線"
+            f"（{len(chapters)} 個章節）"
+        )
+
     def update_book_metadata(self, page_id: str, book: Book) -> None:
         logger.info(f"{_PREFIX} 將更新 '{book.title}' 的元數據 (page {page_id})")
 

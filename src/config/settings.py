@@ -32,6 +32,9 @@ class Settings:
     zettelkasten_tag_categories: List[str] = field(
         default_factory=lambda: list(DEFAULT_TAG_CATEGORIES)
     )
+    # RESYNC_HIGHLIGHTS：空=停用；"all"=全部；否則為書名子字串清單。
+    # 符合的已匯出書籍會刪除同步產生的 block 後重建劃線內容。
+    resync_highlights: List[str] = field(default_factory=list)
 
     @classmethod
     def from_env(cls) -> 'Settings':
@@ -63,7 +66,21 @@ class Settings:
             zettelkasten_tag_categories=cls._parse_tag_categories(
                 os.getenv("ZETTELKASTEN_TAG_CATEGORIES")
             ),
+            resync_highlights=cls._parse_resync(os.getenv("RESYNC_HIGHLIGHTS")),
         )
+
+    @staticmethod
+    def _parse_resync(raw: Optional[str]) -> List[str]:
+        """逗號分隔的書名子字串清單；未設定或全空 → 停用。"""
+        if not raw or not raw.strip():
+            return []
+        return [t.strip() for t in raw.split(",") if t.strip()]
+
+    def resync_matches(self, title: str) -> bool:
+        """此書是否需要重建劃線內容（"all" 或書名含任一子字串）。"""
+        if not self.resync_highlights:
+            return False
+        return any(t == "all" or t in title for t in self.resync_highlights)
 
     @staticmethod
     def _parse_tag_categories(raw: Optional[str]) -> List[str]:

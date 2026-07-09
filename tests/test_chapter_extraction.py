@@ -43,8 +43,14 @@ def test_highlights_have_text_chapter_and_new_fields(repo):
             # fields wired in by improvements #1 / #2
             assert hasattr(h, "annotation")
             assert hasattr(h, "bookmark_id")
-        # output highlights come back in non-decreasing progress order
-        progresses = [h.chapter_progress for h in highlights if h.chapter_progress]
-        assert progresses == sorted(progresses)
+        # reading order: each chapter's highlights form one contiguous run
+        # (ChapterProgress is per-file, so it is NOT globally monotonic)
+        seen = set()
+        previous = None
+        for h in highlights:
+            if h.chapter_name != previous:
+                assert h.chapter_name not in seen, "chapter split into separate runs"
+                seen.add(h.chapter_name)
+                previous = h.chapter_name
         return
     pytest.skip("no highlights found in sample DB")

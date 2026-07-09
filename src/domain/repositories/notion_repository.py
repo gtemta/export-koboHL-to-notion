@@ -24,6 +24,11 @@ class NotionRepository(ABC):
         pass
     
     @abstractmethod
+    def replace_book_highlights(self, page_id: str, highlights: List[Highlight]) -> None:
+        """重建頁面劃線：刪除同步產生的 block 後重新上傳（使用者手動內容保留）"""
+        pass
+
+    @abstractmethod
     def update_book_metadata(self, page_id: str, book: Book) -> None:
         """更新書籍元數據"""
         pass

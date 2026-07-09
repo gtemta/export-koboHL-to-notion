@@ -6,10 +6,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Primary entry (clean architecture)
 - **Sync to Notion**: `python main.py`
+- **Rebuild existing pages**: `RESYNC_HIGHLIGHTS=書名子字串 python main.py`（或 `all`）—
+  已匯出書籍刪除同步產生的 block（heading_1/bullet/callout/divider）後以最新章節結構
+  重建；使用者手動加的內容（paragraph 等）保留。可先搭 `DRY_RUN=true` 預覽。
 
 ### Legacy / specialized entries
 - **Zettelkasten flow**: `python -m legacy.uploadToNotion`
 - **USB auto-sync**: `python checkUSBandUpload.py` (delegates to `main.main()`)
+- **Card backfill**: `python backfill_zettelkasten.py` — one-shot repair for 卡片盒
+  cards missing 來源/Tags (resolves books via 來源劃線ID → KoboReader.sqlite /
+  cards_output JSON, auto-creates Reading List pages, re-runs Tags classification).
+  Supports `DRY_RUN=true`.
 
 ### Quality gates
 - **Lint**: `python -m ruff check .` (config in `pyproject.toml`; `legacy/` + `analysis/` excluded)
@@ -65,8 +72,9 @@ src/
 └── infrastructure/                      — Adapters for external systems
     ├── persistence/
     │   ├── kobo_sqlite_repository.py    — implements BookRepository
-    │   ├── chapter_title_heuristics.py  — extract_real_chapter_title regex patterns
-    │   ├── highlight_organizer.py       — progress-based chapter grouping
+    │   ├── toc_chapter_resolver.py      — deterministic chapter mapping from Kobo TOC
+    │   ├── chapter_title_heuristics.py  — regex title guessing (fallback only)
+    │   ├── highlight_organizer.py       — progress-based grouping (fallback only)
     │   └── card_store.py                — local JSON persistence / resume for cards
     ├── notion/
     │   ├── notion_api_repository.py     — implements NotionRepository
@@ -98,12 +106,22 @@ Run legacy via `python -m legacy.uploadToNotion` (the module adjusts `sys.path` 
 
 ### Chapter Extraction Logic (Key Innovation)
 
-Two-level extraction in the new architecture:
+**Deterministic since 2026-07-10**: KoboReader.sqlite contains each book's real TOC —
+`content.ContentType=899` are TOC entries (real `Title`, `VolumeIndex` order,
+`Depth` 1–4), `ContentType=9` is the spine (file reading order). See
+`docs/superpowers/specs/2026-07-10-toc-chapter-extraction-design.md`.
 
-1. **Per-highlight** (`KoboSqliteRepository._initial_chapter_name`): tries text-based real title → ContentID path → StartContainerPath → ChapterIDBookmarked.
-2. **Progress-based re-grouping** (`highlight_organizer.organize_by_progress`): clusters highlights into N chapters using reading progress, then picks the highest-confidence real title found in each cluster's range.
-
-The simpler `ChapterExtractor` in `src/domain/services/` is used only as a fallback when the repo returns a highlight without a chapter name.
+1. **TOC resolution** (`toc_chapter_resolver.TocChapterResolver`, pure logic + unit
+   tests): a bookmark's file is located in the spine; its chapter = nearest preceding
+   TOC entry ("spine interval" method — handles chapters spanning multiple xhtml
+   files). Labels are `章 › 小節`. Same-file anchored entries are ambiguous only when
+   the file has multiple TOC entries; then the resolver falls back to the nearest
+   strictly-shallower certain entry, or chapter level.
+2. **Sorting** is `(spine_position, ChapterProgress)` — ChapterProgress is per-file,
+   NOT globally monotonic; sorting by it alone interleaves chapters (old bug).
+3. **Fallbacks** (books without TOC data, e.g. sideloads): per-highlight
+   `_initial_chapter_name` heuristics + `organize_by_progress` clustering, and the
+   domain `ChapterExtractor` when a chapter name is still missing.
 
 ### Configuration Requirements
 
@@ -114,6 +132,9 @@ The simpler `ChapterExtractor` in `src/domain/services/` is used only as a fallb
   - `MAX_WORKERS`: thread pool size, default `5`
   - `LOG_LEVEL`: default `INFO`
   - `DRY_RUN`: `true` = reads as normal, Notion writes logged only, card flow skipped (default `false`)
+  - `RESYNC_HIGHLIGHTS`: empty = off; `all` or comma-separated title substrings —
+    matching already-exported books get their sync-generated blocks deleted and
+    highlights re-uploaded (user-added blocks preserved; page id/relations stable)
   - Zettelkasten card generation (used by both `main.py` and the legacy path):
     - `ENABLE_ZETTELKASTEN_CARDS`: `true`/`false` (default `false`)
     - `NOTION_ZETTELKASTEN_DATABASE_ID`: target 卡片盒 database (required when enabled)
@@ -132,16 +153,30 @@ The simpler `ChapterExtractor` in `src/domain/services/` is used only as a fallb
   `Tags` (multi_select — fixed-category classification, only values in the allowed
   list), `來源劃線ID` (rich_text, enables per-highlight dedup), `品質分數` (number),
   `狀態` (select: 草稿/已審/永久筆記). The old `主題` column is no longer used.
+- **Notion DB 三層關係**: 卡片盒 `來源` relation → 📚 Personal Reading List (Books
+  DB, title 欄叫 `Name`)，Reading List 的 `Kobo EReader` relation → Kobo highlights
+  DB。書不在 Reading List 時 repository **自動建頁**（Name=完整書名、Kobo EReader
+  relation、Status 依 Kobo 進度：≥99% → `🔖閱讀完畢`，否則 `📖 閱讀中`——注意
+  option 名稱須與 DB 完全一致，📖 後有空格）；名稱比對命中但 relation 空時會順手
+  補上，讓下次反查直接命中。
+- **Tags 分類比對是 emoji-insensitive**：分類選項帶 emoji 前綴（`💞心理學`），但
+  本地 LLM 幾乎不會照抄 emoji，故 prompt 給純文字名、parser 以 text core
+  （只留字母/數字/CJK）比回 canonical 名稱寫入 Notion。改分類清單時維持這個約定。
 
 ### Key Database Schema
 
-- **content table**: Book metadata (Title, Author, ISBN, reading progress)
+- **content table**: rows are typed by `ContentType`:
+  - `6` = books (Title, Author, ISBN, reading progress)
+  - `9` = spine — epub file reading order (`VolumeIndex`)
+  - `899` = TOC entries — real chapter titles + `Depth` (used by TocChapterResolver)
 - **Bookmark table**: Highlights with chapter references
   - `Text`: the highlighted content
   - `Annotation`: the reader's own handwritten note (exported as a 💭 callout)
   - `BookmarkID`: stable id used for per-highlight card dedup
-  - `ContentID`: chapter file path for extraction
-  - `ChapterProgress`: reading position for sorting
+  - `ContentID`: file the highlight lives in (`{book}!{prefix}!{file}`)
+  - `ChapterProgress`: position within the file (per-file, not global)
+  - `Type`: `highlight` / `dogear` / `markup` — currently NOT filtered (see debt)
+  - Unexported extras: `DateCreated`, `Color`; also Shelf/Reviews/Event tables
 
 ### Error Handling Patterns
 
@@ -162,3 +197,7 @@ The simpler `ChapterExtractor` in `src/domain/services/` is used only as a fallb
   the legacy version can be retired once no longer used.
 - See `docs/ZETTELKASTEN_IMPROVEMENTS.md` for the remaining roadmap (cross-card
   linking #3-2/#3-3 not yet done).
+- **資料純度**：`_HIGHLIGHT_QUERY`/`_BOOK_QUERY` 未過濾 `Bookmark.Type`——實際資料有
+  23 筆 `dogear` 與 107 筆 `markup`（Text 皆空）混入為空白劃線；`Hidden` 也未過濾。
+- **Kobo 未匯出資訊**（2026-07-10 調查，候選功能）：劃線 `DateCreated`/`Color`、
+  `content.Series`/`Language`、Shelf 收藏、Reviews 個人書評、Event/Activity 閱讀行為。

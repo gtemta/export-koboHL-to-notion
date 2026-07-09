@@ -37,10 +37,17 @@ def test_at_least_one_book_has_highlights(books_with_highlights):
     assert books_with_highlights
 
 
-def test_each_book_is_labelled_and_progress_ordered(books_with_highlights):
+def test_each_book_is_labelled_and_chapters_contiguous(books_with_highlights):
     if not books_with_highlights:
         pytest.skip("no highlights in sample DB")
     for _book, highlights in books_with_highlights:
         assert all(h.chapter_name for h in highlights)
-        progresses = [h.chapter_progress for h in highlights if h.chapter_progress]
-        assert progresses == sorted(progresses)
+        # each chapter's highlights form one contiguous run in reading order
+        # (ChapterProgress is per-file, so it is NOT globally monotonic)
+        seen = set()
+        previous = None
+        for h in highlights:
+            if h.chapter_name != previous:
+                assert h.chapter_name not in seen, "chapter split into separate runs"
+                seen.add(h.chapter_name)
+                previous = h.chapter_name

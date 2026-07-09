@@ -13,6 +13,7 @@ from .chapter_title_heuristics import (
     extract_real_chapter_title,
 )
 from .highlight_organizer import organize_by_progress
+from .toc_chapter_resolver import TocChapterResolver
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,17 @@ _BOOK_QUERY = (
     "FROM Bookmark "
     "INNER JOIN content ON Bookmark.VolumeID = content.ContentID "
     "ORDER BY content.Title"
+)
+
+# Kobo 內建目錄：ContentType=9 是 spine（檔案閱讀順序）、899 是 TOC 條目（真實章節標題）
+_SPINE_QUERY = (
+    "SELECT ContentID, VolumeIndex FROM content "
+    "WHERE ContentType = 9 AND BookID = ?"
+)
+
+_TOC_QUERY = (
+    "SELECT ContentID, Title, VolumeIndex, Depth FROM content "
+    "WHERE ContentType = 899 AND BookID = ?"
 )
 
 _HIGHLIGHT_QUERY = (
@@ -82,15 +94,24 @@ class KoboSqliteRepository(BookRepository):
 
     def get_highlights_with_chapters(self, book_id: str) -> List[Highlight]:
         raw: List[Highlight] = []
+        resolved_count = 0
+        sort_keys = {}
         try:
             with self._connect() as conn:
+                resolver = TocChapterResolver(
+                    conn.execute(_SPINE_QUERY, (book_id,)).fetchall(),
+                    conn.execute(_TOC_QUERY, (book_id,)).fetchall(),
+                )
                 for row in conn.execute(_HIGHLIGHT_QUERY, (book_id,)).fetchall():
                     (text, content_id, chapter_progress, start_path, end_path,
                      chapter_id_bookmarked, cur_chapter_est, cur_chapter_prog,
                      annotation, bookmark_id) = row
-                    raw.append(Highlight(
+                    toc_chapter = resolver.resolve(content_id or '')
+                    if toc_chapter:
+                        resolved_count += 1
+                    highlight = Highlight(
                         text=text or '',
-                        chapter_name=self._initial_chapter_name(
+                        chapter_name=toc_chapter or self._initial_chapter_name(
                             text or '', content_id or '', start_path, chapter_id_bookmarked),
                         chapter_progress=chapter_progress or 0.0,
                         content_id=content_id or '',
@@ -101,11 +122,23 @@ class KoboSqliteRepository(BookRepository):
                         current_chapter_progress=cur_chapter_prog,
                         annotation=annotation,
                         bookmark_id=bookmark_id,
-                    ))
+                    )
+                    spine_pos = resolver.spine_position(content_id or '')
+                    sort_keys[id(highlight)] = (
+                        spine_pos if spine_pos is not None else float('inf'),
+                        chapter_progress or 0.0,
+                    )
+                    raw.append(highlight)
         except sqlite3.Error as e:
             logger.error(f"讀取書籍 {book_id} 的高亮失敗: {e}", exc_info=True)
             raise
 
+        if resolved_count:
+            # TOC 命中：確定性章節 + spine 順序排序，不再用進度分群發明章節
+            logger.info(
+                f"TOC 精確章節解析: {resolved_count}/{len(raw)} 筆劃線命中")
+            return sorted(raw, key=lambda h: sort_keys[id(h)])
+        # 整本書無 TOC 資料（sideload 等）→ 維持原進度分群 pipeline
         return organize_by_progress(raw)
 
     @staticmethod

@@ -21,6 +21,12 @@ logger = logging.getLogger(__name__)
 _BATCH_SIZE = 80
 _MAX_BLOCKS_PER_REQUEST = 100
 
+# sync_book_highlights 產生的 block 類型；resync 重建時只刪這些，
+# 使用者手動加的內容（paragraph、toggle…）一律保留
+_SYNC_GENERATED_BLOCK_TYPES = frozenset(
+    {"heading_1", "bulleted_list_item", "callout", "divider"}
+)
+
 
 class NotionApiRepository(NotionRepository):
     """Thin wrapper around notion_client with retry + rate-limit handling."""
@@ -92,6 +98,13 @@ class NotionApiRepository(NotionRepository):
             ),
             self._rate_limiter,
         )
+
+    def replace_book_highlights(self, page_id: str, highlights: List[Highlight]) -> None:
+        """Rebuild the page's highlight blocks: delete sync-generated blocks,
+        keep user-added content, then re-upload."""
+        deleted = self._delete_sync_generated_blocks(page_id)
+        logger.info(f"重建 page {page_id}: 已刪除 {deleted} 個同步產生的 block")
+        self.sync_book_highlights(page_id, highlights)
 
     def update_book_metadata(self, page_id: str, book: Book) -> None:
         properties = self._build_properties(book)
@@ -219,6 +232,38 @@ class NotionApiRepository(NotionRepository):
                 ),
                 self._rate_limiter,
             )
+
+    @staticmethod
+    def _is_sync_generated(block: Dict[str, Any]) -> bool:
+        return block.get("type") in _SYNC_GENERATED_BLOCK_TYPES
+
+    def _list_page_blocks(self, page_id: str) -> List[Dict[str, Any]]:
+        blocks: List[Dict[str, Any]] = []
+        cursor: Optional[str] = None
+        while True:
+            kwargs: Dict[str, Any] = {"block_id": page_id, "page_size": 100}
+            if cursor:
+                kwargs["start_cursor"] = cursor
+            response = retry_with_backoff(
+                lambda k=kwargs: self._client.blocks.children.list(**k),
+                self._rate_limiter,
+            )
+            blocks.extend(response.get("results", []))
+            if not response.get("has_more"):
+                return blocks
+            cursor = response.get("next_cursor")
+
+    def _delete_sync_generated_blocks(self, page_id: str) -> int:
+        deleted = 0
+        for block in self._list_page_blocks(page_id):
+            if not self._is_sync_generated(block):
+                continue
+            retry_with_backoff(
+                lambda b=block: self._client.blocks.delete(block_id=b["id"]),
+                self._rate_limiter,
+            )
+            deleted += 1
+        return deleted
 
     @staticmethod
     def _group_by_chapter(highlights: List[Highlight]):
