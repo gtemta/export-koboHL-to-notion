@@ -7,14 +7,18 @@ class SyncResult:
     """同步結果數據傳輸對象"""
     total_books: int
     successful_syncs: int
-    failed_syncs: int = 0
     errors: List[str] = None
-    
+
     def __post_init__(self):
         if self.errors is None:
             self.errors = []
-        self.failed_syncs = self.total_books - self.successful_syncs
-    
+
+    @property
+    def failed_syncs(self) -> int:
+        """動態計算：successful_syncs 由 execute() 事後遞增，不能在建構時定格"""
+        return self.total_books - self.successful_syncs
+
+
     @property
     def success_rate(self) -> float:
         """成功率百分比"""
