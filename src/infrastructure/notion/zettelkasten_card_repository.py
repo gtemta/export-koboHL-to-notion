@@ -44,6 +44,13 @@ _REVIEWED_SCORE = 7
 # Books DB title property + the relation on it that points back at the Kobo DB.
 _BOOKS_TITLE_PROPERTY = "Name"
 _KOBO_RELATION_PROPERTY = "Kobo EReader"
+# Books DB reading status (select). Option names must match the DB exactly —
+# note the space in "📖 閱讀中".
+_BOOKS_STATUS_PROPERTY = "Status"
+_BOOK_STATUS_DONE = "🔖閱讀完畢"
+_BOOK_STATUS_READING = "📖 閱讀中"
+# Kobo ___PercentRead is 0-100; at/above this the book counts as finished.
+_BOOK_DONE_PERCENT = 99
 
 # sentinel: schema not yet fetched (distinct from "fetched, empty/unreadable").
 _UNSET = object()
@@ -52,10 +59,11 @@ _UNSET = object()
 class ZettelkastenCardRepository:
     """Uploads Zettelkasten cards to the Notion 卡片盒 database.
 
-    The `來源` relation targets the Books DB, not the Kobo highlights DB.
-    We resolve it by querying the Books DB by book title; if no match is
-    found, the card is still created but without the relation (the user
-    can link it manually).
+    The `來源` relation targets the Books DB (Personal Reading List), not the
+    Kobo highlights DB. Resolution order: reverse lookup via the Books-DB
+    `Kobo EReader` relation → title match → **auto-create** a Books-DB page
+    (Name = book title, Kobo EReader relation, Status derived from reading
+    progress). Only if creation also fails is the card left unlinked.
     """
 
     def __init__(
@@ -78,22 +86,25 @@ class ZettelkastenCardRepository:
         self._schema_ensured = False
         # E4 full Books-DB page list, fetched once for name-based matching
         self._books_pages_cache = _UNSET
+        # Books-DB property names; _UNSET until fetched, None if unreadable
+        self._books_schema_props = _UNSET
 
     def upload_cards(
         self,
         cards: List[ZettelkastenCard],
         book_title: str,
         source_page_id: Optional[str] = None,
+        percent_read: Optional[float] = None,
     ) -> int:
         if not cards:
             return 0
 
         self._ensure_schema()
 
-        books_page_id = self._find_book_page(book_title, source_page_id)
+        books_page_id = self._find_book_page(book_title, source_page_id, percent_read)
         if self._books_database_id and books_page_id is None:
             logger.warning(
-                f"Books DB 找不到 '{book_title}'，卡片會建立但不會連結「來源」"
+                f"Books DB 找不到也建不了 '{book_title}'，卡片會建立但不會連結「來源」"
             )
 
         if books_page_id:
@@ -138,6 +149,16 @@ class ZettelkastenCardRepository:
 
         logger.info(f"卡片盒同步完成: {success_count}/{len(pending)}")
         return success_count
+
+    def resolve_book_page(
+        self,
+        book_title: str,
+        source_page_id: Optional[str] = None,
+        percent_read: Optional[float] = None,
+    ) -> Optional[str]:
+        """Public entry for backfill tooling: Books-DB page id for a title,
+        auto-creating the page when the book isn't listed yet."""
+        return self._find_book_page(book_title, source_page_id, percent_read)
 
     # ----- Internals -----
 
@@ -216,14 +237,19 @@ class ZettelkastenCardRepository:
         return {"multi_select": {"options": merged}}
 
     def _find_book_page(
-        self, book_title: str, source_page_id: Optional[str] = None
+        self,
+        book_title: str,
+        source_page_id: Optional[str] = None,
+        percent_read: Optional[float] = None,
     ) -> Optional[str]:
         """E4: resolve the Books-DB page for a card's 來源 relation.
 
         1. reverse lookup: Books page whose `Kobo EReader` relation points at the
            source highlight page (exact, no title ambiguity);
         2. strengthened title match (equals → contains → normalized two-way
-           containment over the whole Books DB).
+           containment over the whole Books DB) — a match with an empty
+           `Kobo EReader` relation gets it backfilled so次回反查直接命中;
+        3. auto-create the Books-DB page when nothing matches.
         """
         if not self._books_database_id:
             return None
@@ -233,7 +259,13 @@ class ZettelkastenCardRepository:
             if pid:
                 return pid
 
-        return self._match_book_by_name(book_title)
+        page = self._match_book_by_name(book_title)
+        if page is not None:
+            if source_page_id:
+                self._backfill_kobo_relation(page, source_page_id)
+            return page.get("id")
+
+        return self._create_book_page(book_title, source_page_id, percent_read)
 
     def _reverse_lookup_book(self, source_page_id: str) -> Optional[str]:
         try:
@@ -255,7 +287,8 @@ class ZettelkastenCardRepository:
             logger.warning(f"Books DB 反查（{_KOBO_RELATION_PROPERTY}）失敗: {e}")
         return None
 
-    def _match_book_by_name(self, book_title: str) -> Optional[str]:
+    def _match_book_by_name(self, book_title: str) -> Optional[dict]:
+        """Books-DB page (full dict) whose Name matches the book title."""
         main = self._main_title(book_title)
         if not main:
             return None
@@ -275,7 +308,7 @@ class ZettelkastenCardRepository:
                 ) or {}
                 results = result.get("results") or []
                 if results:
-                    return results[0].get("id")
+                    return results[0]
             except Exception as e:
                 logger.warning(f"Books DB 查詢 '{main}' 失敗: {e}")
                 break
@@ -285,8 +318,100 @@ class ZettelkastenCardRepository:
         for page in self._all_books_pages():
             name_norm = self._normalize(self._page_name(page))
             if name_norm and (name_norm in main_norm or main_norm in name_norm):
-                return page.get("id")
+                return page
         return None
+
+    def _backfill_kobo_relation(self, page: dict, source_page_id: str) -> None:
+        """Fill an empty `Kobo EReader` relation on a name-matched Books page.
+
+        Makes the next run's reverse lookup hit exactly. No-op when the page
+        lacks the property or already has a relation.
+        """
+        prop = (page.get("properties") or {}).get(_KOBO_RELATION_PROPERTY) or {}
+        if prop.get("type") != "relation" or prop.get("relation"):
+            return
+        try:
+            retry_with_backoff(
+                lambda: self._client.pages.update(
+                    page_id=page["id"],
+                    properties={
+                        _KOBO_RELATION_PROPERTY: {
+                            "relation": [{"id": source_page_id}]
+                        }
+                    },
+                ),
+                self._rate_limiter,
+            )
+            logger.info(
+                f"Books DB '{self._page_name(page)}' 補上 {_KOBO_RELATION_PROPERTY} relation"
+            )
+        except Exception as e:
+            logger.warning(f"Books DB 補 {_KOBO_RELATION_PROPERTY} relation 失敗: {e}")
+
+    def _create_book_page(
+        self,
+        book_title: str,
+        source_page_id: Optional[str],
+        percent_read: Optional[float],
+    ) -> Optional[str]:
+        """Auto-create the Personal Reading List page for an unlisted book.
+
+        Name = full book title (list entries keep their subtitles), Kobo
+        EReader relation → the highlights page, Status derived from reading
+        progress. Properties missing from the Books DB schema are skipped.
+        """
+        if not self._books_database_id:
+            return None
+
+        props: dict = {
+            _BOOKS_TITLE_PROPERTY: {
+                "title": [{"text": {"content": book_title[:_RICH_TEXT_LIMIT]}}]
+            },
+        }
+        if source_page_id and self._books_wants(_KOBO_RELATION_PROPERTY):
+            props[_KOBO_RELATION_PROPERTY] = {"relation": [{"id": source_page_id}]}
+        if self._books_wants(_BOOKS_STATUS_PROPERTY):
+            props[_BOOKS_STATUS_PROPERTY] = {
+                "select": {"name": self._book_status_name(percent_read)}
+            }
+
+        try:
+            page = retry_with_backoff(
+                lambda: self._client.pages.create(
+                    parent={"database_id": self._books_database_id},
+                    properties=props,
+                ),
+                self._rate_limiter,
+            ) or {}
+            logger.info(f"Reading List 自動建頁: '{book_title}'")
+            return page.get("id")
+        except Exception as e:
+            logger.warning(f"Reading List 自動建頁失敗 '{book_title}': {e}")
+            return None
+
+    @staticmethod
+    def _book_status_name(percent_read: Optional[float]) -> str:
+        """Reading-status option from Kobo progress (0-100 scale)."""
+        return (
+            _BOOK_STATUS_DONE
+            if (percent_read or 0) >= _BOOK_DONE_PERCENT
+            else _BOOK_STATUS_READING
+        )
+
+    def _books_wants(self, prop_name: str) -> bool:
+        """Whether the Books DB has a property; True too when its schema
+        couldn't be read (then we write as-is and let Notion validate)."""
+        if self._books_schema_props is _UNSET:
+            try:
+                db = retry_with_backoff(
+                    lambda: self._client.databases.retrieve(self._books_database_id),
+                    self._rate_limiter,
+                ) or {}
+                self._books_schema_props = set((db.get("properties") or {}).keys())
+            except Exception as e:
+                logger.warning(f"讀取 Books DB schema 失敗: {e}")
+                self._books_schema_props = None
+        return self._books_schema_props is None or prop_name in self._books_schema_props
 
     def _all_books_pages(self) -> List[dict]:
         if self._books_pages_cache is not _UNSET:

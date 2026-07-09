@@ -81,7 +81,7 @@ class _FakeRepo:
         self.fail_first = fail_first
         self.calls = 0
 
-    def upload_cards(self, cards, book_title, source_page_id=None):
+    def upload_cards(self, cards, book_title, source_page_id=None, percent_read=None):
         self.calls += 1
         if self.fail_first and self.calls == 1:
             raise RuntimeError("simulated upload failure")
@@ -92,6 +92,7 @@ class _FakeRepo:
 class _Book:
     def __init__(self, title):
         self.title = title
+        self.percent_read = None
 
 
 class TestUseCaseResume(unittest.TestCase):

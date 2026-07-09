@@ -37,7 +37,7 @@ class GenerateBookCardsUseCase:
                 if pending:
                     path, cards = pending
                     uploaded = self._card_repo.upload_cards(
-                        cards, book.title, source_page_id
+                        cards, book.title, source_page_id, book.percent_read
                     )
                     self._store.mark_uploaded(path)
                     return uploaded
@@ -49,7 +49,9 @@ class GenerateBookCardsUseCase:
 
             # 先落地再上傳，上傳失敗時下次可續傳。
             path = self._store.save(book.title, cards) if self._store else None
-            uploaded = self._card_repo.upload_cards(cards, book.title, source_page_id)
+            uploaded = self._card_repo.upload_cards(
+                cards, book.title, source_page_id, book.percent_read
+            )
             if self._store is not None:
                 self._store.mark_uploaded(path)
             return uploaded
