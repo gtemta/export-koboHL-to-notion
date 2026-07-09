@@ -119,14 +119,19 @@ The simpler `ChapterExtractor` in `src/domain/services/` is used only as a fallb
     - `NOTION_ZETTELKASTEN_DATABASE_ID`: target 卡片盒 database (required when enabled)
     - `NOTION_BOOKS_DATABASE_ID`: Books DB the card `來源` relation points at (optional)
     - `ZETTELKASTEN_MIN_HIGHLIGHTS` (default `10`), `ZETTELKASTEN_MAX_CARDS` (default `16`)
+    - `ZETTELKASTEN_TAG_CATEGORIES`: comma-separated fixed Tags list (default in `settings.DEFAULT_TAG_CATEGORIES`). LLM classifies each card into 1-2 of these; missing options are auto-seeded into the 卡片盒 Tags column on first upload.
     - `ZETTELKASTEN_CARDS_OUTPUT_DIR`: local card JSON dir (default `cards_output`, gitignored)
     - Ollama + Gemini vars (`OLLAMA_*`, `GEMINI_*`): see `.env.example`
 - **KoboReader.sqlite**: Copy from Kobo device to project root (or set `KOBO_DB_PATH`)
 - **Notion database** must have: Title (text), Exported (checkbox). Optional fields: Author, Publisher, Subtitle, Description, ISBN, SpendReadingTime, LastReadDate, LastFinishedReadTime, PercentageRead.
-- **Notion 卡片盒 database** (when cards enabled): 標題 (title) is required. Optional
-  columns are written only if present (the repository reads the DB schema first):
-  `來源` (relation → Books DB), `來源劃線ID` (text, enables per-highlight dedup),
-  `主題` (multi_select concept tags), `品質分數` (number), `狀態` (select: 草稿/已審/永久筆記).
+- **Notion 卡片盒 database** (when cards enabled): 標題 (title) is required. The
+  repository reads the DB schema first and **auto-creates** the missing optional
+  columns (`來源劃線ID`, `品質分數`, `狀態`) + seeds missing `Tags` options on the
+  first upload (`_ensure_schema`). Columns written when present:
+  `來源` (relation → Books DB), `Key Word` (rich_text — free concept tags, 、-joined),
+  `Tags` (multi_select — fixed-category classification, only values in the allowed
+  list), `來源劃線ID` (rich_text, enables per-highlight dedup), `品質分數` (number),
+  `狀態` (select: 草稿/已審/永久筆記). The old `主題` column is no longer used.
 
 ### Key Database Schema
 

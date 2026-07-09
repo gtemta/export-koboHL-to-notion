@@ -55,11 +55,13 @@ def _build_card_use_case(settings: Settings):
     generator = ZettelkastenCardGenerator(
         max_cards=settings.zettelkasten_max_cards,
         min_highlights=settings.zettelkasten_min_highlights,
+        tag_categories=settings.zettelkasten_tag_categories,
     )
     card_repo = ZettelkastenCardRepository(
         token=settings.notion_token,
         database_id=settings.notion_zettelkasten_database_id,
         books_database_id=settings.notion_books_database_id,
+        tag_categories=settings.zettelkasten_tag_categories,
     )
     card_store = CardStore(output_dir=settings.zettelkasten_cards_output_dir)
     return GenerateBookCardsUseCase(

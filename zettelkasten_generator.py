@@ -34,7 +34,8 @@ class ZettelkastenCard:
     quality_score: int = 0            # Quality score from Gemini review (1-10)
     revision_notes: str = ""          # Notes from Gemini review
     source_bookmark_id: str = ""      # Kobo BookmarkID of the source highlight
-    tags: List[str] = field(default_factory=list)  # Concept tags (2-3)
+    tags: List[str] = field(default_factory=list)  # Free concept tags (2-3) → Key Word
+    categories: List[str] = field(default_factory=list)  # Fixed Tags classification (1-2)
     created_at: datetime = field(default_factory=datetime.now)
 
     def to_dict(self) -> Dict:
@@ -50,6 +51,7 @@ class ZettelkastenCard:
             'revision_notes': self.revision_notes,
             'source_bookmark_id': self.source_bookmark_id,
             'tags': self.tags,
+            'categories': self.categories,
             'created_at': self.created_at.isoformat()
         }
 
@@ -72,6 +74,7 @@ class ZettelkastenCard:
             revision_notes=d.get('revision_notes', '') or '',
             source_bookmark_id=d.get('source_bookmark_id', '') or '',
             tags=list(d.get('tags') or []),
+            categories=list(d.get('categories') or []),
             created_at=created_at,
         )
 
@@ -462,6 +465,133 @@ class ZettelkastenLLMEnhancer:
                 break
         return tags
 
+    # ----- E3: fixed-category classification (Tags multi_select) -----
+
+    _CLASSIFY_SPLIT = re.compile(r'[、,，/|｜\s]+')
+    _CLASSIFY_LINE = re.compile(r'CARD[_\- ]?(\d+)\s*[:：]\s*(.*)', re.IGNORECASE)
+
+    @classmethod
+    def _parse_classification(
+        cls, text: str, n: int, allowed: List[str]
+    ) -> List[List[str]]:
+        """Parse `CARD_i: 分類A、分類B` lines into per-card category lists.
+
+        Only values in `allowed` survive (exact match); at most 2 per card;
+        cards with no valid category get []. Pure — no Ollama, unit-testable.
+        """
+        result: List[List[str]] = [[] for _ in range(n)]
+        if not text or not allowed:
+            return result
+        allowed_set = set(allowed)
+        cleaned = cls._strip_thinking(text)
+        for line in cleaned.splitlines():
+            m = cls._CLASSIFY_LINE.search(line)
+            if not m:
+                continue
+            try:
+                idx = int(m.group(1))
+            except ValueError:
+                continue
+            if not (1 <= idx <= n):
+                continue
+            picked: List[str] = []
+            for part in cls._CLASSIFY_SPLIT.split(m.group(2).strip()):
+                name = part.strip()
+                if name in allowed_set and name not in picked:
+                    picked.append(name)
+                if len(picked) >= 2:
+                    break
+            result[idx - 1] = picked
+        return result
+
+    def _build_classification_prompt(
+        self, cards: List[ZettelkastenCard], categories: List[str]
+    ) -> str:
+        allowed = "、".join(categories)
+        card_blocks = []
+        for i, c in enumerate(cards, start=1):
+            card_blocks.append(f"CARD_{i}：{c.title}｜{c.content}")
+        cards_section = "\n".join(card_blocks)
+        return f"""你是一位知識分類助理。以下是 {len(cards)} 張卡片筆記，請為每張卡片挑選最貼切的分類。
+
+可用分類（只能從這裡挑，不可自創）：
+{allowed}
+
+卡片：
+{cards_section}
+
+規則：
+1. 每張卡片挑 1-2 個最貼切的分類，只能從上面清單挑，用頓號（、）分隔
+2. 如果沒有任何分類貼切，該卡片留空（不要硬塞、不要發明新分類）
+3. 嚴格依照格式逐行輸出，每張卡片一行：CARD_編號：分類
+4. 不要加任何解釋或結語
+
+請直接輸出："""
+
+    def classify_cards(
+        self, cards: List[ZettelkastenCard], categories: List[str],
+        book_title: str = "",
+    ) -> None:
+        """Assign fixed-category Tags to each card in place via one Ollama call.
+
+        No-op if there are no cards or no category list. On any Ollama failure
+        the cards simply keep empty `categories` (left for manual tagging).
+        """
+        if not cards or not categories:
+            return
+
+        prompt = self._build_classification_prompt(cards, categories)
+        timeout_s = int(os.getenv('OLLAMA_BATCH_TIMEOUT_SECONDS', '600'))
+        keep_alive = os.getenv('OLLAMA_KEEP_ALIVE', '30m')
+        num_ctx = int(os.getenv('OLLAMA_BATCH_NUM_CTX', '16384'))
+
+        accumulated: List[str] = []
+        start_time = time.monotonic()
+        logger.info(
+            f"Ollama classify request → model={self.model} cards={len(cards)} "
+            f"prompt_chars={len(prompt)}"
+        )
+        try:
+            response = requests.post(
+                self.api_url,
+                json={
+                    "model": self.model,
+                    "prompt": prompt,
+                    "stream": True,
+                    "keep_alive": keep_alive,
+                    "options": {"temperature": 0.3, "num_predict": 1000, "num_ctx": num_ctx},
+                },
+                timeout=timeout_s,
+                stream=True,
+            )
+            if response.status_code != 200:
+                logger.error(
+                    f"Ollama classify error: status={response.status_code} "
+                    f"body={response.text[:300]}"
+                )
+                return
+            for line in response.iter_lines(decode_unicode=True):
+                if not line:
+                    continue
+                chunk = json.loads(line)
+                accumulated.append(chunk.get("response", ""))
+                if chunk.get("done"):
+                    break
+        except Exception as e:  # noqa: BLE001 — classification is best-effort
+            elapsed = time.monotonic() - start_time
+            logger.error(f"Ollama classify failed after {elapsed:.1f}s: {e}")
+            # fall through: parse whatever streamed in before the error, if any
+
+        parsed = self._parse_classification(
+            "".join(accumulated), len(cards), categories
+        )
+        assigned = 0
+        for card, cats in zip(cards, parsed):
+            card.categories = cats
+            if cats:
+                assigned += 1
+        logger.info(f"Ollama classify done: {assigned}/{len(cards)} cards tagged")
+
     def _build_batch_prompt(self, highlights: List[Dict], book_title: str = "") -> str:
         n = len(highlights)
         book_context = f"書名：{book_title}\n\n" if book_title else ""
@@ -836,11 +966,14 @@ class ZettelkastenCardGenerator:
     def __init__(self,
                  max_cards: int = None,
                  min_highlights: int = None,
-                 enable_gemini_review: bool = True):
+                 enable_gemini_review: bool = True,
+                 tag_categories: Optional[List[str]] = None):
 
         self.max_cards = max_cards or int(os.getenv('ZETTELKASTEN_MAX_CARDS', '16'))
         self.min_highlights = min_highlights or int(os.getenv('ZETTELKASTEN_MIN_HIGHLIGHTS', '10'))
         self.enable_gemini_review = enable_gemini_review
+        # Fixed Tags classification list (DI from settings); empty → classification off.
+        self.tag_categories = list(tag_categories or [])
 
         self.selector = CardSelectionAlgorithm(
             max_cards=self.max_cards,
@@ -897,6 +1030,11 @@ class ZettelkastenCardGenerator:
                 card.quality_score = 7  # Default score
 
         logger.info(f"Card generation complete: {len(final_cards)} cards")
+
+        # Step 5: Classify into fixed Tags categories (one Ollama call per book)
+        if final_cards and self.tag_categories:
+            logger.info("Classifying cards into fixed Tags categories...")
+            self.enhancer.classify_cards(final_cards, self.tag_categories, book_title)
 
         # Log quality statistics
         if final_cards:

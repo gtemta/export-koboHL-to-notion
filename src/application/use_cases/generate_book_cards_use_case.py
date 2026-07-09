@@ -24,14 +24,21 @@ class GenerateBookCardsUseCase:
         self._store = card_store
         self._logger = logging.getLogger(__name__)
 
-    def execute(self, book: Book, highlights: List[Highlight]) -> int:
+    def execute(
+        self,
+        book: Book,
+        highlights: List[Highlight],
+        source_page_id: Optional[str] = None,
+    ) -> int:
         try:
             # 續傳：若上次已產生但尚未（完整）上傳，先送出留存的卡片，不重跑 LLM。
             if self._store is not None:
                 pending = self._store.load_pending(book.title)
                 if pending:
                     path, cards = pending
-                    uploaded = self._card_repo.upload_cards(cards, book.title)
+                    uploaded = self._card_repo.upload_cards(
+                        cards, book.title, source_page_id
+                    )
                     self._store.mark_uploaded(path)
                     return uploaded
 
@@ -42,7 +49,7 @@ class GenerateBookCardsUseCase:
 
             # 先落地再上傳，上傳失敗時下次可續傳。
             path = self._store.save(book.title, cards) if self._store else None
-            uploaded = self._card_repo.upload_cards(cards, book.title)
+            uploaded = self._card_repo.upload_cards(cards, book.title, source_page_id)
             if self._store is not None:
                 self._store.mark_uploaded(path)
             return uploaded

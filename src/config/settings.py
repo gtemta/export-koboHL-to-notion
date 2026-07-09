@@ -1,9 +1,16 @@
 import logging
 import os
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import List, Optional
 
 from dotenv import load_dotenv
+
+# 卡片盒 Tags multi_select 的固定分類清單。LLM 只能從此清單挑，不可自由新增；
+# 歸不進任何分類時回空，留給使用者手動處理。可用 ZETTELKASTEN_TAG_CATEGORIES 覆寫。
+DEFAULT_TAG_CATEGORIES: List[str] = [
+    "💞心理學", "🧠學習技巧", "💼商務", "🧘‍♂️人生觀點", "🧩邏輯思考",
+    "🔬哲學科學", "💻軟體工程", "📈行銷", "📋專案管理", "💰理財投資",
+]
 
 
 @dataclass
@@ -22,6 +29,9 @@ class Settings:
     zettelkasten_min_highlights: int = 10
     zettelkasten_max_cards: int = 16
     zettelkasten_cards_output_dir: str = "cards_output"
+    zettelkasten_tag_categories: List[str] = field(
+        default_factory=lambda: list(DEFAULT_TAG_CATEGORIES)
+    )
 
     @classmethod
     def from_env(cls) -> 'Settings':
@@ -50,7 +60,18 @@ class Settings:
             zettelkasten_min_highlights=int(os.getenv("ZETTELKASTEN_MIN_HIGHLIGHTS", "10")),
             zettelkasten_max_cards=int(os.getenv("ZETTELKASTEN_MAX_CARDS", "16")),
             zettelkasten_cards_output_dir=os.getenv("ZETTELKASTEN_CARDS_OUTPUT_DIR", "cards_output"),
+            zettelkasten_tag_categories=cls._parse_tag_categories(
+                os.getenv("ZETTELKASTEN_TAG_CATEGORIES")
+            ),
         )
+
+    @staticmethod
+    def _parse_tag_categories(raw: Optional[str]) -> List[str]:
+        """逗號分隔的分類清單；未設定或全空則用 DEFAULT_TAG_CATEGORIES。"""
+        if not raw or not raw.strip():
+            return list(DEFAULT_TAG_CATEGORIES)
+        parsed = [c.strip() for c in raw.split(",") if c.strip()]
+        return parsed or list(DEFAULT_TAG_CATEGORIES)
     
     def setup_logging(self) -> logging.Logger:
         """設定日誌記錄"""

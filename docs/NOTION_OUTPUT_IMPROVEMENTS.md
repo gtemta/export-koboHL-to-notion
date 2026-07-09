@@ -8,11 +8,11 @@
 
 ## 實作進度
 
-- ⬜ E1 自動建立卡片盒缺失欄位（來源劃線ID / 品質分數 / 狀態）
-- ⬜ E2 Key Word 寫入自由概念標籤
-- ⬜ E3 Tags 固定分類 + LLM 批次分類
-- ⬜ E4 來源 relation 修正（反查 + 書名雙保險）
-- ⬜ E5 dedup 兜底（書不在 Books DB 時不再重複建卡）
+- ✅ E1 自動建立卡片盒缺失欄位（來源劃線ID / 品質分數 / 狀態）— KNOWLEDGE_REFINEMENT_PLAN Phase 1
+- ✅ E2 Key Word 寫入自由概念標籤
+- ✅ E3 Tags 固定分類 + LLM 批次分類
+- ✅ E4 來源 relation 修正（反查 + 書名雙保險）
+- ✅ E5 dedup 兜底（書不在 Books DB 時不再重複建卡）
 - ⬜ A 劃線頁改版（toggle 章節 / quote / 2000 字截斷）
 - ⬜ B 卡片頁顯示讀者註記
 - ⬜ D 劃線頁 ↔ 卡片盒互連

@@ -79,7 +79,7 @@ class SyncBooksUseCase:
                 # 補齊卡片：若卡片盒尚無此書關聯卡片，repo 內 dedup 會控制是否實際新增
                 if self.card_use_case is not None:
                     highlights = self.book_repo.get_highlights_with_chapters(book.id)
-                    self.card_use_case.execute(book, highlights)
+                    self.card_use_case.execute(book, highlights, source_page_id=page_id)
                 return True
             
             # 檢查書籍是否存在但未導出
@@ -120,7 +120,7 @@ class SyncBooksUseCase:
 
             # 產生 Zettelkasten 卡片並上傳卡片盒（若已啟用）
             if self.card_use_case is not None:
-                self.card_use_case.execute(book, highlights)
+                self.card_use_case.execute(book, highlights, source_page_id=page_id)
 
             # 更新書籍元數據
             self.notion_repo.update_book_metadata(page_id, book)
