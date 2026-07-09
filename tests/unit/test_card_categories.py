@@ -54,6 +54,55 @@ class TestParseClassification(unittest.TestCase):
         self.assertEqual(parsed, [[]])
 
 
+class TestEmojiInsensitiveMatching(unittest.TestCase):
+    """Local models rarely reproduce emoji prefixes — the parser must map the
+    plain-text name back to the canonical (emoji-prefixed) category."""
+
+    def test_plain_text_maps_to_canonical(self):
+        text = "CARD_1：心理學、學習技巧"
+        parsed = ZettelkastenLLMEnhancer._parse_classification(text, 1, ALLOWED)
+        self.assertEqual(parsed, [["💞心理學", "🧠學習技巧"]])
+
+    def test_zwj_emoji_category_plain_output(self):
+        # 🧘‍♂️ is a multi-codepoint ZWJ sequence; plain output must still match.
+        text = "CARD_1：人生觀點"
+        parsed = ZettelkastenLLMEnhancer._parse_classification(text, 1, ALLOWED)
+        self.assertEqual(parsed, [["🧘‍♂️人生觀點"]])
+
+    def test_mangled_emoji_still_matches(self):
+        # model echoes a partial emoji (🧘 without ZWJ+♂️+VS16)
+        text = "CARD_1：🧘人生觀點"
+        parsed = ZettelkastenLLMEnhancer._parse_classification(text, 1, ALLOWED)
+        self.assertEqual(parsed, [["🧘‍♂️人生觀點"]])
+
+    def test_exact_emoji_output_still_matches(self):
+        text = "CARD_1：💞心理學"
+        parsed = ZettelkastenLLMEnhancer._parse_classification(text, 1, ALLOWED)
+        self.assertEqual(parsed, [["💞心理學"]])
+
+    def test_invented_category_still_dropped(self):
+        text = "CARD_1：心理學、量子力學"
+        parsed = ZettelkastenLLMEnhancer._parse_classification(text, 1, ALLOWED)
+        self.assertEqual(parsed, [["💞心理學"]])
+
+    def test_category_core(self):
+        core = ZettelkastenLLMEnhancer._category_core
+        self.assertEqual(core("💞心理學"), "心理學")
+        self.assertEqual(core("🧘‍♂️人生觀點"), "人生觀點")
+        self.assertEqual(core("  學習 技巧  "), "學習技巧")
+        self.assertEqual(core(""), "")
+
+    def test_prompt_lists_plain_names(self):
+        enhancer = ZettelkastenLLMEnhancer()
+        card = ZettelkastenCard(
+            id="x", title="t", content="c", source_highlight="h",
+            chapter_reference="ch", chapter_progress=0.0,
+        )
+        prompt = enhancer._build_classification_prompt([card], ALLOWED)
+        self.assertIn("心理學", prompt)
+        self.assertNotIn("💞心理學", prompt)
+
+
 class TestBookTitleMatching(unittest.TestCase):
     """E4: main-title extraction + normalization used for fuzzy Books-DB match."""
 

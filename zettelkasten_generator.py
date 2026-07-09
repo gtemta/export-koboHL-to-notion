@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -470,19 +471,34 @@ class ZettelkastenLLMEnhancer:
     _CLASSIFY_SPLIT = re.compile(r'[、,，/|｜\s]+')
     _CLASSIFY_LINE = re.compile(r'CARD[_\- ]?(\d+)\s*[:：]\s*(.*)', re.IGNORECASE)
 
+    @staticmethod
+    def _category_core(name: str) -> str:
+        """Text core of a category name: letters/digits only.
+
+        Drops emoji, ZWJ, variation selectors and whitespace so that
+        "💞心理學", "心理學" and a mangled "🧘人生觀點" all map to the same key —
+        small local models rarely reproduce multi-codepoint emoji exactly.
+        """
+        return "".join(
+            ch for ch in (name or "")
+            if unicodedata.category(ch)[0] in ("L", "N")
+        )
+
     @classmethod
     def _parse_classification(
         cls, text: str, n: int, allowed: List[str]
     ) -> List[List[str]]:
         """Parse `CARD_i: 分類A、分類B` lines into per-card category lists.
 
-        Only values in `allowed` survive (exact match); at most 2 per card;
-        cards with no valid category get []. Pure — no Ollama, unit-testable.
+        Category names are matched on their text core (emoji-insensitive) and
+        written back as the canonical `allowed` value, so Notion multi_select
+        options keep their emoji prefix. At most 2 per card; cards with no
+        valid category get []. Pure — no Ollama, unit-testable.
         """
         result: List[List[str]] = [[] for _ in range(n)]
         if not text or not allowed:
             return result
-        allowed_set = set(allowed)
+        canonical = {cls._category_core(a): a for a in allowed if cls._category_core(a)}
         cleaned = cls._strip_thinking(text)
         for line in cleaned.splitlines():
             m = cls._CLASSIFY_LINE.search(line)
@@ -496,8 +512,8 @@ class ZettelkastenLLMEnhancer:
                 continue
             picked: List[str] = []
             for part in cls._CLASSIFY_SPLIT.split(m.group(2).strip()):
-                name = part.strip()
-                if name in allowed_set and name not in picked:
+                name = canonical.get(cls._category_core(part))
+                if name and name not in picked:
                     picked.append(name)
                 if len(picked) >= 2:
                     break
@@ -507,7 +523,9 @@ class ZettelkastenLLMEnhancer:
     def _build_classification_prompt(
         self, cards: List[ZettelkastenCard], categories: List[str]
     ) -> str:
-        allowed = "、".join(categories)
+        # 給模型看純文字分類名（去 emoji），小模型較能一字不差照抄；
+        # parse 時再以 text core 對回 canonical 名稱。
+        allowed = "、".join(self._category_core(c) or c for c in categories)
         card_blocks = []
         for i, c in enumerate(cards, start=1):
             card_blocks.append(f"CARD_{i}：{c.title}｜{c.content}")
@@ -551,19 +569,29 @@ class ZettelkastenLLMEnhancer:
             f"Ollama classify request → model={self.model} cards={len(cards)} "
             f"prompt_chars={len(prompt)}"
         )
+        payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "stream": True,
+            "keep_alive": keep_alive,
+            # thinking models (e.g. gemma4:e4b) silently burn the whole
+            # num_predict budget on hidden reasoning before any visible output
+            # (done_reason=length, response "") — disable it for this short
+            # structured task.
+            "think": False,
+            "options": {"temperature": 0.3, "num_predict": 1000, "num_ctx": num_ctx},
+        }
         try:
             response = requests.post(
-                self.api_url,
-                json={
-                    "model": self.model,
-                    "prompt": prompt,
-                    "stream": True,
-                    "keep_alive": keep_alive,
-                    "options": {"temperature": 0.3, "num_predict": 1000, "num_ctx": num_ctx},
-                },
-                timeout=timeout_s,
-                stream=True,
+                self.api_url, json=payload, timeout=timeout_s, stream=True,
             )
+            if response.status_code == 400 and "think" in payload:
+                # older Ollama / non-thinking model may reject the parameter
+                logger.info("Ollama 不接受 think 參數，改以預設模式重試")
+                payload.pop("think")
+                response = requests.post(
+                    self.api_url, json=payload, timeout=timeout_s, stream=True,
+                )
             if response.status_code != 200:
                 logger.error(
                     f"Ollama classify error: status={response.status_code} "
@@ -574,17 +602,25 @@ class ZettelkastenLLMEnhancer:
                 if not line:
                     continue
                 chunk = json.loads(line)
+                if chunk.get("error"):
+                    logger.error(f"Ollama classify in-stream error: {chunk['error']}")
+                    break
                 accumulated.append(chunk.get("response", ""))
                 if chunk.get("done"):
+                    if chunk.get("done_reason") == "length" and not "".join(accumulated).strip():
+                        logger.warning(
+                            "Ollama classify hit num_predict with empty output "
+                            "(thinking-model budget exhausted?)"
+                        )
                     break
         except Exception as e:  # noqa: BLE001 — classification is best-effort
             elapsed = time.monotonic() - start_time
             logger.error(f"Ollama classify failed after {elapsed:.1f}s: {e}")
             # fall through: parse whatever streamed in before the error, if any
 
-        parsed = self._parse_classification(
-            "".join(accumulated), len(cards), categories
-        )
+        raw = "".join(accumulated)
+        logger.debug(f"Ollama classify raw response ({len(raw)} chars): {raw[:500]}")
+        parsed = self._parse_classification(raw, len(cards), categories)
         assigned = 0
         for card, cats in zip(cards, parsed):
             card.categories = cats

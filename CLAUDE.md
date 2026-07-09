@@ -162,6 +162,9 @@ Run legacy via `python -m legacy.uploadToNotion` (the module adjusts `sys.path` 
 - **Tags 分類比對是 emoji-insensitive**：分類選項帶 emoji 前綴（`💞心理學`），但
   本地 LLM 幾乎不會照抄 emoji，故 prompt 給純文字名、parser 以 text core
   （只留字母/數字/CJK）比回 canonical 名稱寫入 Notion。改分類清單時維持這個約定。
+  另外分類呼叫帶 `think: false`——gemma4:e4b 這類 thinking model 否則會把
+  `num_predict` 全部燒在隱藏推理上（done_reason=length、輸出空字串）；400 時
+  自動退回不帶參數重試。
 
 ### Key Database Schema
 
