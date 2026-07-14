@@ -17,6 +17,11 @@ from .toc_chapter_resolver import TocChapterResolver
 
 logger = logging.getLogger(__name__)
 
+# 只取真實劃線：dogear/markup 的 Text 皆空（實測 23+107 筆）、Hidden 防禦性排除
+_BOOKMARK_FILTER = (
+    "Bookmark.Type = 'highlight' "
+    "AND IFNULL(Bookmark.Hidden, 'false') NOT IN ('true', '1')"
+)
 
 _BOOK_QUERY = (
     "SELECT DISTINCT content.ContentId, content.Title, content.Subtitle, "
@@ -25,6 +30,7 @@ _BOOK_QUERY = (
     "content.LastTimeFinishedReading, content.ISBN "
     "FROM Bookmark "
     "INNER JOIN content ON Bookmark.VolumeID = content.ContentID "
+    f"WHERE {_BOOKMARK_FILTER} "
     "ORDER BY content.Title"
 )
 
@@ -46,7 +52,7 @@ _HIGHLIGHT_QUERY = (
     "content.CurrentChapterProgress, Bookmark.Annotation, Bookmark.BookmarkID "
     "FROM Bookmark "
     "INNER JOIN content ON Bookmark.VolumeID = content.ContentID "
-    "WHERE Bookmark.VolumeID = ? "
+    f"WHERE Bookmark.VolumeID = ? AND {_BOOKMARK_FILTER} "
     "ORDER BY Bookmark.ChapterProgress"
 )
 
