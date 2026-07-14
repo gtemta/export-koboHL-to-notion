@@ -13,7 +13,9 @@
 - ✅ E3 Tags 固定分類 + LLM 批次分類
 - ✅ E4 來源 relation 修正（反查 + 書名雙保險）
 - ✅ E5 dedup 兜底（書不在 Books DB 時不再重複建卡）
-- ⬜ A 劃線頁改版（toggle 章節 / quote / 2000 字截斷）
+- ✅ A 劃線頁改版 — 2026-07-14 以「兩層巢狀 toggle」實作（章→小節→quote→💭 child），
+  超出原 A1 單層規劃；A3 以無損多段拆分取代截斷。規格見
+  `docs/superpowers/specs/2026-07-13-knowledge-management-four-batches-design.md` 第 1 批
 - ⬜ B 卡片頁顯示讀者註記
 - ⬜ D 劃線頁 ↔ 卡片盒互連
 

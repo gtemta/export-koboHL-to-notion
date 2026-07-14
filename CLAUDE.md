@@ -77,7 +77,8 @@ src/
     │   ├── highlight_organizer.py       — progress-based grouping (fallback only)
     │   └── card_store.py                — local JSON persistence / resume for cards
     ├── notion/
-    │   ├── notion_api_repository.py     — implements NotionRepository
+    │   ├── notion_api_repository.py     — implements NotionRepository (API orchestration)
+    │   ├── highlight_page_blocks.py     — pure block builders: 劃線頁 v2 兩層 toggle 版面
     │   ├── dry_run_notion_repository.py — DRY_RUN decorator: reads delegate, writes log-only
     │   ├── zettelkasten_card_repository.py — uploads cards to 卡片盒 DB (per-highlight dedup)
     │   ├── rate_limiter.py              — thread-safe ~3 req/s limiter
@@ -97,6 +98,15 @@ to the generator, persists the batch via `CardStore`, then uploads through
 
 Inside the use case: for each book, check Notion → create if missing → fetch highlights (with sophisticated chapter extraction already done by the repo) → upload in batched blocks → update metadata → attach cover.
 
+**劃線頁版面（v2, 2026-07-14）**：頁首「📌 劃線筆記」＋兩層巢狀 toggle——章
+（toggle heading_1）→ 小節（toggle heading_2）→ 劃線 `quote`；💭 註記 callout 是
+quote 的 child。純 block 建構在 `highlight_page_blocks.py`（rich_text >2000 字無損
+拆段、小節 >90 條拆「(續)」toggle、`chapter_tree` 依 `toc_chapter/toc_section` 分組），
+`NotionApiRepository.sync_book_highlights` 先 append 章 toggle 取 id、再對每章 append
+巢狀 children（以 toggle 為單位切批，不拆散單一 toggle）。RESYNC 刪除清單維持頂層
+heading_1/bullet/callout/divider——v2 的 quote/heading_2 巢狀在章 toggle 內隨父塊刪除，
+頂層 quote/heading_2 視為使用者內容（勿加入刪除清單）。
+
 ### Legacy code (`legacy/`)
 
 - `legacy/uploadToNotion.py` (1070 lines): original monolithic sync. Integrates with `zettelkasten_generator.py` at root. Card generation is now also available in `src/` (see below); this legacy entry is kept for its USB-automation glue.
@@ -114,8 +124,11 @@ Run legacy via `python -m legacy.uploadToNotion` (the module adjusts `sys.path` 
 1. **TOC resolution** (`toc_chapter_resolver.TocChapterResolver`, pure logic + unit
    tests): a bookmark's file is located in the spine; its chapter = nearest preceding
    TOC entry ("spine interval" method — handles chapters spanning multiple xhtml
-   files). Labels are `章 › 小節`. Same-file anchored entries are ambiguous only when
-   the file has multiple TOC entries; then the resolver falls back to the nearest
+   files). `resolve_parts()` returns structured `(章, 小節)` (untruncated, drives the
+   two-level toggle layout via `Highlight.toc_chapter/toc_section`); `resolve()` is a
+   thin wrapper returning the joined `章 › 小節` label (60-char cap, feeds
+   `chapter_name` for cards/fallback). Same-file anchored entries are ambiguous only
+   when the file has multiple TOC entries; then the resolver falls back to the nearest
    strictly-shallower certain entry, or chapter level.
 2. **Sorting** is `(spine_position, ChapterProgress)` — ChapterProgress is per-file,
    NOT globally monotonic; sorting by it alone interleaves chapters (old bug).
@@ -200,7 +213,7 @@ Run legacy via `python -m legacy.uploadToNotion` (the module adjusts `sys.path` 
   the legacy version can be retired once no longer used.
 - See `docs/ZETTELKASTEN_IMPROVEMENTS.md` for the remaining roadmap (cross-card
   linking #3-2/#3-3 not yet done).
-- **資料純度**：`_HIGHLIGHT_QUERY`/`_BOOK_QUERY` 未過濾 `Bookmark.Type`——實際資料有
-  23 筆 `dogear` 與 107 筆 `markup`（Text 皆空）混入為空白劃線；`Hidden` 也未過濾。
+- ~~**資料純度**~~：已解（2026-07-14，劃線頁 v2 第 1 批）——`_BOOKMARK_FILTER` 過濾
+  `Bookmark.Type='highlight'` 與 `Hidden`，130 筆空白 dogear/markup 不再混入。
 - **Kobo 未匯出資訊**（2026-07-10 調查，候選功能）：劃線 `DateCreated`/`Color`、
   `content.Series`/`Language`、Shelf 收藏、Reviews 個人書評、Event/Activity 閱讀行為。
