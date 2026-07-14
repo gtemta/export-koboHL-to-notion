@@ -53,8 +53,8 @@ class DryRunNotionRepository(NotionRepository):
     def replace_book_highlights(self, page_id: str, highlights: List[Highlight]) -> None:
         chapters = {h.chapter_name or "未知章節" for h in highlights}
         logger.info(
-            f"{_PREFIX} 將刪除 page {page_id} 上同步產生的 block"
-            f"（heading/bullet/callout/divider），並重建 {len(highlights)} 個劃線"
+            f"{_PREFIX} 將刪除 page {page_id} 上同步產生的頂層 block，"
+            f"並以兩層 toggle 版面重建 {len(highlights)} 個劃線"
             f"（{len(chapters)} 個章節）"
         )
 

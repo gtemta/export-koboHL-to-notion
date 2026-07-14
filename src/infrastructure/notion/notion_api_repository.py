@@ -11,6 +11,13 @@ from ...domain.entities.book import Book
 from ...domain.entities.highlight import Highlight
 from ...domain.repositories.notion_repository import NotionRepository
 from ..external.cover_fetcher import get_best_book_cover
+from .highlight_page_blocks import (
+    PAGE_TITLE,
+    chapter_children,
+    chapter_tree,
+    heading_block,
+    total_block_count,
+)
 from .rate_limiter import NotionRateLimiter
 from .retry_policy import retry_with_backoff
 
@@ -21,8 +28,10 @@ logger = logging.getLogger(__name__)
 _BATCH_SIZE = 80
 _MAX_BLOCKS_PER_REQUEST = 100
 
-# sync_book_highlights 產生的 block 類型；resync 重建時只刪這些，
-# 使用者手動加的內容（paragraph、toggle…）一律保留
+# sync_book_highlights 產生的「頂層」block 類型；resync 重建時只刪這些
+# （v2 版面的 quote/小節 heading_2 巢狀在章 toggle=heading_1 內，隨父塊遞迴刪除；
+# bulleted_list_item/divider 保留是為了清掉 v1 舊版頁面）。
+# 頂層的 paragraph、toggle、quote、heading_2… 視為使用者手動內容，一律保留。
 _SYNC_GENERATED_BLOCK_TYPES = frozenset(
     {"heading_1", "bulleted_list_item", "callout", "divider"}
 )
@@ -68,28 +77,26 @@ class NotionApiRepository(NotionRepository):
         return page_id is not None
 
     def sync_book_highlights(self, page_id: str, highlights: List[Highlight]) -> None:
-        """Upload highlights grouped by chapter, then mark book as exported."""
-        blocks = [self._heading_block("Highlights", level=1)]
+        """Upload highlights as 章 toggle → 小節 toggle → quote（💭 註記為
+        quote 的 child），then mark book as exported."""
+        tree = chapter_tree(highlights)
+        logger.info(
+            f"開始同步 {len(highlights)} 個劃線（{len(tree)} 章）到 page {page_id}")
 
-        logger.info(f"開始同步 {len(highlights)} 個高亮到 page {page_id}")
+        top_blocks = [heading_block(PAGE_TITLE, level=1)]
+        top_blocks += [heading_block(g.title, level=1, toggleable=True)
+                       for g in tree]
+        created = self._append_blocks_returning_ids(page_id, top_blocks)
+        if len(created) != len(top_blocks):
+            raise RuntimeError(
+                f"頂層 block 建立數量不符: 預期 {len(top_blocks)} 實得 {len(created)}")
 
-        grouped = self._group_by_chapter(highlights)
-        for chapter_name, group in grouped:
-            display_name = self._sanitize_chapter_name(chapter_name, group)
-            logger.info(f"章節: {display_name} ({len(group)} 個高亮)")
-
-            blocks.append(self._heading_block(f"📖 {display_name}", level=1))
-            for h in group:
-                blocks.extend(self._highlight_blocks(h))
-            blocks.append({"object": "block", "type": "divider", "divider": {}})
-
-            if len(blocks) > _BATCH_SIZE:
-                logger.info(f"達批次上限 {len(blocks)},先送出")
-                self._append_blocks(page_id, blocks)
-                blocks = []
-
-        if blocks:
-            self._append_blocks(page_id, blocks)
+        for group, block in zip(tree, created[1:]):  # created[0] 是頁首標題
+            n_sections = len(group.sections)
+            logger.info(
+                f"章節: {group.title}（直下 {len(group.direct)} 條、"
+                f"{n_sections} 小節）")
+            self._append_chapter_children(block["id"], chapter_children(group))
 
         retry_with_backoff(
             lambda: self._client.pages.update(
@@ -220,6 +227,39 @@ class NotionApiRepository(NotionRepository):
                 else:
                     raise
 
+    def _append_blocks_returning_ids(
+            self, parent_id: str,
+            blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Append top-level blocks and return the created block objects
+        (in order) — 章 toggle 需要 id 才能掛 children."""
+        created: List[Dict[str, Any]] = []
+        for i in range(0, len(blocks), _MAX_BLOCKS_PER_REQUEST):
+            batch = blocks[i:i + _MAX_BLOCKS_PER_REQUEST]
+            response = retry_with_backoff(
+                lambda b=batch: self._client.blocks.children.append(
+                    block_id=parent_id, children=b,
+                ),
+                self._rate_limiter,
+            )
+            created.extend(response.get("results", []))
+        return created
+
+    def _append_chapter_children(self, chapter_block_id: str,
+                                 blocks: List[Dict[str, Any]]) -> None:
+        """以 toggle 為單位切批（不得把一個 toggle 的 children 拆到兩個
+        request），批次預算按含巢狀的總 block 數計。"""
+        batch: List[Dict[str, Any]] = []
+        budget = 0
+        for block in blocks:
+            size = total_block_count(block)
+            if batch and budget + size > _BATCH_SIZE:
+                self._append_blocks(chapter_block_id, batch)
+                batch, budget = [], 0
+            batch.append(block)
+            budget += size
+        if batch:
+            self._append_blocks(chapter_block_id, batch)
+
     def _append_in_smaller_chunks(self, page_id: str,
                                   oversized_batch: List[Dict[str, Any]]) -> None:
         size = min(50, len(oversized_batch) // 2) or 1
@@ -264,66 +304,6 @@ class NotionApiRepository(NotionRepository):
             )
             deleted += 1
         return deleted
-
-    @staticmethod
-    def _group_by_chapter(highlights: List[Highlight]):
-        """Return list of (chapter_name, [highlights]) in first-seen order."""
-        order: Dict[str, int] = {}
-        groups: Dict[str, List[Highlight]] = {}
-        for h in highlights:
-            name = h.chapter_name or "未知章節"
-            if name not in groups:
-                groups[name] = []
-                order[name] = len(order)
-            groups[name].append(h)
-        return sorted(groups.items(), key=lambda kv: order[kv[0]])
-
-    @staticmethod
-    def _sanitize_chapter_name(name: str, group: List[Highlight]) -> str:
-        if name in ("未知章節", "未知章节") and group:
-            return "其他內容"
-        return name[:47] + "..." if len(name) > 50 else name
-
-    @staticmethod
-    def _heading_block(text: str, level: int = 1) -> Dict[str, Any]:
-        key = f"heading_{level}"
-        return {
-            "object": "block",
-            "type": key,
-            key: {"rich_text": [{"type": "text", "text": {"content": text}}]},
-        }
-
-    @classmethod
-    def _highlight_blocks(cls, h: Highlight) -> List[Dict[str, Any]]:
-        """Blocks for a single highlight: the highlighted text as a bullet,
-        plus a 💭 callout for the reader's own annotation if present."""
-        blocks: List[Dict[str, Any]] = []
-        if h.text:
-            blocks.append(cls._bulleted_block(h.text))
-        if h.has_annotation():
-            blocks.append(cls._annotation_callout(h.annotation.strip()))
-        return blocks
-
-    @staticmethod
-    def _annotation_callout(text: str) -> Dict[str, Any]:
-        return {
-            "object": "block",
-            "type": "callout",
-            "callout": {
-                "icon": {"type": "emoji", "emoji": "💭"},
-                "rich_text": [{"type": "text", "text": {"content": text[:2000]}}],
-            },
-        }
-
-    @staticmethod
-    def _bulleted_block(text: str) -> Dict[str, Any]:
-        return {
-            "object": "block",
-            "type": "bulleted_list_item",
-            "bulleted_list_item": {
-                "rich_text": [{"type": "text", "text": {"content": text}}],
-            },
-        }
 
 
 def _clean_html(text: str) -> str:

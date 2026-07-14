@@ -2,7 +2,7 @@
 import unittest
 
 from src.domain.entities.highlight import Highlight
-from src.infrastructure.notion.notion_api_repository import NotionApiRepository
+from src.infrastructure.notion.highlight_page_blocks import quote_block
 from zettelkasten_generator import CardSelectionAlgorithm, ZettelkastenLLMEnhancer
 
 
@@ -28,29 +28,26 @@ class TestHighlightAnnotation(unittest.TestCase):
 
 
 class TestNotionAnnotationBlocks(unittest.TestCase):
-    def test_bullet_only_without_annotation(self):
-        blocks = NotionApiRepository._highlight_blocks(_highlight())
-        self.assertEqual(len(blocks), 1)
-        self.assertEqual(blocks[0]["type"], "bulleted_list_item")
+    """v2 版面：註記 callout 巢狀在 quote 之下。"""
 
-    def test_callout_added_with_annotation(self):
-        blocks = NotionApiRepository._highlight_blocks(
-            _highlight(annotation="這段讓我想到複利效應")
-        )
-        self.assertEqual(len(blocks), 2)
-        self.assertEqual(blocks[1]["type"], "callout")
-        self.assertEqual(blocks[1]["callout"]["icon"]["emoji"], "💭")
+    def test_quote_only_without_annotation(self):
+        block = quote_block(_highlight())
+        self.assertEqual(block["type"], "quote")
+        self.assertNotIn("children", block["quote"])
+
+    def test_callout_nested_with_annotation(self):
+        block = quote_block(_highlight(annotation="這段讓我想到複利效應"))
+        children = block["quote"]["children"]
+        self.assertEqual(children[0]["type"], "callout")
+        self.assertEqual(children[0]["callout"]["icon"]["emoji"], "💭")
         self.assertEqual(
-            blocks[1]["callout"]["rich_text"][0]["text"]["content"],
-            "這段讓我想到複利效應",
-        )
+            children[0]["callout"]["rich_text"][0]["text"]["content"],
+            "這段讓我想到複利效應")
 
-    def test_annotation_truncated_at_2000(self):
-        blocks = NotionApiRepository._highlight_blocks(
-            _highlight(annotation="字" * 3000)
-        )
-        content = blocks[1]["callout"]["rich_text"][0]["text"]["content"]
-        self.assertEqual(len(content), 2000)
+    def test_annotation_over_2000_lossless(self):
+        block = quote_block(_highlight(annotation="字" * 3000))
+        segs = block["quote"]["children"][0]["callout"]["rich_text"]
+        self.assertEqual(sum(len(s["text"]["content"]) for s in segs), 3000)
 
 
 class TestAnnotationScoring(unittest.TestCase):
