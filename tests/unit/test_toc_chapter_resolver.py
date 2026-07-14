@@ -154,5 +154,35 @@ class TestTocChapterResolver(unittest.TestCase):
         self.assertTrue(label.endswith("..."))
 
 
+class TestResolveParts(unittest.TestCase):
+    """兩層版面需要結構化（章, 小節），不再解析合併字串。"""
+
+    def setUp(self):
+        self.resolver = _make_resolver()
+
+    def test_chapter_with_section(self):
+        self.assertEqual(
+            self.resolver.resolve_parts(_B + "Text/sec2-1.xhtml"),
+            ("Chapter 2", "小節丙"))
+
+    def test_chapter_only(self):
+        self.assertEqual(
+            self.resolver.resolve_parts(_B + "Text/ch1.xhtml"),
+            ("Chapter 1", None))
+
+    def test_unresolvable_returns_none(self):
+        self.assertIsNone(self.resolver.resolve_parts(_B + "Text/cover.xhtml"))
+
+    def test_parts_not_truncated(self):
+        """resolve() 截 60 字是顯示用；parts 保留原文供 toggle 標題使用"""
+        long_title = "很長的章節標題" * 20
+        resolver = TocChapterResolver(
+            [(_B + "Text/a.xhtml", 0)],
+            [(_B + "Text/a.xhtml-1", long_title, 0, 1)])
+        chapter, section = resolver.resolve_parts(_B + "Text/a.xhtml")
+        self.assertEqual(chapter, long_title)
+        self.assertIsNone(section)
+
+
 if __name__ == "__main__":
     unittest.main()

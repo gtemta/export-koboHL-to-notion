@@ -93,8 +93,11 @@ class TocChapterResolver:
     def spine_position(self, content_id: str) -> Optional[int]:
         return self._spine.get(_bookmark_file(content_id))
 
-    def resolve(self, content_id: str) -> Optional[str]:
-        """Return "章 › 小節" (or just the chapter) for a bookmark, else None."""
+    def resolve_parts(self, content_id: str) -> Optional[Tuple[str, Optional[str]]]:
+        """Return (chapter, section-or-None) for a bookmark, else None.
+
+        Titles are returned untruncated — display truncation is resolve()'s job.
+        """
         pos = self.spine_position(content_id)
         if pos is None or not self._entries:
             return None
@@ -126,11 +129,18 @@ class TocChapterResolver:
             break
 
         if chapter and section:
-            label = f"{chapter.title} › {section.title}"
-        elif chapter or section:
-            label = (chapter or section).title
-        else:
+            return chapter.title, section.title
+        if chapter or section:
+            return (chapter or section).title, None
+        return None
+
+    def resolve(self, content_id: str) -> Optional[str]:
+        """Return "章 › 小節" (or just the chapter) for a bookmark, else None."""
+        parts = self.resolve_parts(content_id)
+        if parts is None:
             return None
+        chapter, section = parts
+        label = f"{chapter} › {section}" if section else chapter
         if len(label) > _MAX_LABEL_LEN:
             label = label[:_MAX_LABEL_LEN - 3] + "..."
         return label
