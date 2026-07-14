@@ -112,12 +112,13 @@ class KoboSqliteRepository(BookRepository):
                     (text, content_id, chapter_progress, start_path, end_path,
                      chapter_id_bookmarked, cur_chapter_est, cur_chapter_prog,
                      annotation, bookmark_id) = row
-                    toc_chapter = resolver.resolve(content_id or '')
-                    if toc_chapter:
+                    toc_parts = resolver.resolve_parts(content_id or '')
+                    toc_label = resolver.resolve(content_id or '')
+                    if toc_label:
                         resolved_count += 1
                     highlight = Highlight(
                         text=text or '',
-                        chapter_name=toc_chapter or self._initial_chapter_name(
+                        chapter_name=toc_label or self._initial_chapter_name(
                             text or '', content_id or '', start_path, chapter_id_bookmarked),
                         chapter_progress=chapter_progress or 0.0,
                         content_id=content_id or '',
@@ -128,6 +129,8 @@ class KoboSqliteRepository(BookRepository):
                         current_chapter_progress=cur_chapter_prog,
                         annotation=annotation,
                         bookmark_id=bookmark_id,
+                        toc_chapter=toc_parts[0] if toc_parts else None,
+                        toc_section=toc_parts[1] if toc_parts else None,
                     )
                     spine_pos = resolver.spine_position(content_id or '')
                     sort_keys[id(highlight)] = (

@@ -16,6 +16,8 @@ class Highlight:
     current_chapter_progress: Optional[float] = None
     annotation: Optional[str] = None
     bookmark_id: Optional[str] = None
+    toc_chapter: Optional[str] = None
+    toc_section: Optional[str] = None
 
     def is_valid(self) -> bool:
         """檢查高亮是否有效"""

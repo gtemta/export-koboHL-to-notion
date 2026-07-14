@@ -48,6 +48,54 @@ def _create_db(path):
     conn.close()
 
 
+class TestTocPartsOnHighlight(unittest.TestCase):
+    """TOC 命中時 Highlight 帶結構化章/小節，供兩層 toggle 版面分組。"""
+
+    def setUp(self):
+        fd, self.db_path = tempfile.mkstemp(suffix=".sqlite")
+        os.close(fd)
+        _create_db(self.db_path)
+        conn = sqlite3.connect(self.db_path)
+        # spine（ContentType=9）與 TOC（ContentType=899）：ch1 檔屬「第一章 › 開場」
+        conn.execute(
+            "INSERT INTO content (ContentID, ContentType, BookID, VolumeIndex) "
+            "VALUES (?, 9, ?, 0)", (f"{_BOOK}!OEBPS!Text/ch1.xhtml", _BOOK))
+        conn.execute(
+            "INSERT INTO content (ContentID, Title, ContentType, BookID, VolumeIndex, "
+            "Depth) VALUES (?, '第一章', 899, ?, 0, 1)",
+            (f"{_BOOK}!OEBPS!Text/ch1.xhtml-1", _BOOK))
+        conn.execute(
+            "INSERT INTO content (ContentID, Title, ContentType, BookID, VolumeIndex, "
+            "Depth) VALUES (?, '開場', 899, ?, 1, 2)",
+            (f"{_BOOK}!OEBPS!Text/ch1.xhtml#a1-2", _BOOK))
+        conn.commit()
+        conn.close()
+        self.repo = KoboSqliteRepository(self.db_path)
+
+    def tearDown(self):
+        os.remove(self.db_path)
+
+    def test_toc_parts_populated(self):
+        h = self.repo.get_highlights_with_chapters(_BOOK)[0]
+        # 同檔多條目且第二條帶 anchor → 模糊，退回章級
+        self.assertEqual(h.toc_chapter, "第一章")
+        self.assertIsNone(h.toc_section)
+        self.assertEqual(h.chapter_name, "第一章")
+
+    def test_no_toc_leaves_parts_none(self):
+        """無 TOC 的書（_BOOK2 無 899 列）parts 為 None，走 fallback"""
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "INSERT INTO Bookmark (BookmarkID, VolumeID, ContentID, Text, "
+            "ChapterProgress, Type) VALUES ('bm-9', ?, ?, '無目錄劃線', 0.5, "
+            "'highlight')", (_BOOK2, f"{_BOOK2}!OEBPS!Text/x.xhtml"))
+        conn.commit()
+        conn.close()
+        h = self.repo.get_highlights_with_chapters(_BOOK2)[0]
+        self.assertIsNone(h.toc_chapter)
+        self.assertIsNone(h.toc_section)
+
+
 class TestBookmarkTypeFilter(unittest.TestCase):
     def setUp(self):
         fd, self.db_path = tempfile.mkstemp(suffix=".sqlite")
