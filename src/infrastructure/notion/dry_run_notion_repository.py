@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 from ...domain.entities.book import Book
 from ...domain.entities.highlight import Highlight
 from ...domain.repositories.notion_repository import NotionRepository
+from .highlight_page_blocks import chapter_tree
 
 logger = logging.getLogger(__name__)
 
@@ -44,18 +45,18 @@ class DryRunNotionRepository(NotionRepository):
         return True
 
     def sync_book_highlights(self, page_id: str, highlights: List[Highlight]) -> None:
-        chapters = {h.chapter_name or "未知章節" for h in highlights}
+        chapters = chapter_tree(highlights)
         logger.info(
-            f"{_PREFIX} 將上傳 {len(highlights)} 個劃線（{len(chapters)} 個章節）"
+            f"{_PREFIX} 將上傳 {len(highlights)} 個劃線（{len(chapters)} 章）"
             f"到 page {page_id}，並勾選 Exported"
         )
 
     def replace_book_highlights(self, page_id: str, highlights: List[Highlight]) -> None:
-        chapters = {h.chapter_name or "未知章節" for h in highlights}
+        chapters = chapter_tree(highlights)
         logger.info(
             f"{_PREFIX} 將刪除 page {page_id} 上同步產生的頂層 block，"
             f"並以兩層 toggle 版面重建 {len(highlights)} 個劃線"
-            f"（{len(chapters)} 個章節）"
+            f"（{len(chapters)} 章）"
         )
 
     def update_book_metadata(self, page_id: str, book: Book) -> None:

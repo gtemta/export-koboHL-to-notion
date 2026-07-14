@@ -35,7 +35,8 @@ class TestDryRunNotionRepository(unittest.TestCase):
 
     def test_writes_never_reach_inner(self):
         book = SimpleNamespace(title="測試書")
-        highlight = SimpleNamespace(chapter_name="第一章")
+        highlight = SimpleNamespace(
+            chapter_name="第一章", toc_chapter=None, toc_section=None)
         self.repo.create_book_entry("測試書")
         self.repo.sync_book_highlights("page-1", [highlight])
         self.repo.update_book_metadata("page-1", book)

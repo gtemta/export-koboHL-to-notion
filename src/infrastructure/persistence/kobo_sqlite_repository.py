@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # 只取真實劃線：dogear/markup 的 Text 皆空（實測 23+107 筆）、Hidden 防禦性排除
 _BOOKMARK_FILTER = (
     "Bookmark.Type = 'highlight' "
-    "AND IFNULL(Bookmark.Hidden, 'false') NOT IN ('true', '1')"
+    "AND IFNULL(Bookmark.Hidden, 'false') NOT IN ('true', '1', 1)"
 )
 
 _BOOK_QUERY = (

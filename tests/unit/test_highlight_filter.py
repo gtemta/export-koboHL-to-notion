@@ -25,7 +25,9 @@ def _create_db(path):
         "CREATE TABLE Bookmark ("
         "BookmarkID TEXT, VolumeID TEXT, ContentID TEXT, Text TEXT, "
         "Annotation TEXT, ChapterProgress REAL, StartContainerPath TEXT, "
-        "EndContainerPath TEXT, Type TEXT, Hidden TEXT)"
+        # Hidden 無宣告型別 → NONE/BLOB affinity，保留插入時的原始型別
+        # （真實 Kobo 資料的 Hidden 可能是整數 1，不是文字 '1'）
+        "EndContainerPath TEXT, Type TEXT, Hidden)"
     )
     # 兩本書（content 書籍列）
     for cid, title in ((_BOOK, "真書"), (_BOOK2, "只有摺角的書")):
@@ -37,6 +39,8 @@ def _create_db(path):
         ("bm-2", _BOOK, f"{_BOOK}!OEBPS!Text/ch1.xhtml", "", "dogear", None),
         ("bm-3", _BOOK, f"{_BOOK}!OEBPS!Text/ch1.xhtml", "", "markup", None),
         ("bm-4", _BOOK, f"{_BOOK}!OEBPS!Text/ch1.xhtml", "被隱藏的劃線", "highlight", "true"),
+        # Hidden 為整數 1（非文字 '1'）——舊過濾 NOT IN ('true','1') 漏掉整數
+        ("bm-6", _BOOK, f"{_BOOK}!OEBPS!Text/ch1.xhtml", "整數隱藏劃線", "highlight", 1),
         ("bm-5", _BOOK2, f"{_BOOK2}!OEBPS!Text/ch1.xhtml", "", "dogear", None),
     ]
     for bid, vol, cid, text, btype, hidden in rows:
@@ -107,10 +111,16 @@ class TestBookmarkTypeFilter(unittest.TestCase):
         os.remove(self.db_path)
 
     def test_only_real_highlights_returned(self):
-        """dogear/markup（Text 全空）與 Hidden 劃線不進結果"""
+        """dogear/markup（Text 全空）與 Hidden 劃線（文字 'true' 與整數 1）不進結果"""
         highlights = self.repo.get_highlights_with_chapters(_BOOK)
         self.assertEqual([h.text for h in highlights], ["真劃線"])
         self.assertEqual([h.bookmark_id for h in highlights], ["bm-1"])
+
+    def test_integer_hidden_excluded(self):
+        """Hidden 為整數 1 的劃線被排除（NOT IN 需含整數 1，非只 '1'）"""
+        highlights = self.repo.get_highlights_with_chapters(_BOOK)
+        self.assertNotIn("整數隱藏劃線", [h.text for h in highlights])
+        self.assertNotIn("bm-6", [h.bookmark_id for h in highlights])
 
     def test_book_with_only_dogears_not_listed(self):
         """整本書只有摺角 → 不出現在書單"""
