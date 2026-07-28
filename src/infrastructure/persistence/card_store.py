@@ -22,9 +22,19 @@ class CardStore:
     def __init__(self, output_dir: str = "cards_output"):
         self._dir = output_dir
 
-    def save(self, book_title: str, cards: List[ZettelkastenCard]) -> Optional[str]:
-        """Write a batch of cards as an un-uploaded JSON; return its path."""
-        if not cards:
+    def save(
+        self,
+        book_title: str,
+        cards: List[ZettelkastenCard],
+        rejected: Optional[List[ZettelkastenCard]] = None,
+    ) -> Optional[str]:
+        """Write a batch of cards as an un-uploaded JSON; return its path.
+
+        `rejected` holds the cards the review gate threw away. They are recorded
+        under a separate key so there is a trace of what was dropped and why —
+        `load_pending` only ever reads `cards`, so they can never be uploaded.
+        """
+        if not cards and not rejected:
             return None
         path = os.path.join(self._dir, self._filename(book_title))
         payload = {
@@ -32,12 +42,16 @@ class CardStore:
             "created_at": datetime.now().isoformat(),
             "uploaded": False,
             "cards": [c.to_dict() for c in cards],
+            "rejected": [c.to_dict() for c in (rejected or [])],
         }
         try:
             os.makedirs(self._dir, exist_ok=True)
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
-            logger.info(f"卡片已本地留存: {path} ({len(cards)} 張)")
+            logger.info(
+                f"卡片已本地留存: {path} (通過 {len(cards)} 張"
+                f"／退回 {len(rejected or [])} 張)"
+            )
             return path
         except OSError as e:
             logger.warning(f"卡片本地留存失敗 ({path}): {e}")

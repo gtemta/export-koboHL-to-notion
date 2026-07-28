@@ -32,6 +32,8 @@ class GenerateBookCardsUseCase:
     ) -> int:
         try:
             # 續傳：若上次已產生但尚未（完整）上傳，先送出留存的卡片，不重跑 LLM。
+            # 留存的卡當初就是通過審核才被存進 cards 的，這裡不再過閘門
+            # （否則 Ollama 沒開時已付出代價的卡就永遠傳不出去）。
             if self._store is not None:
                 pending = self._store.load_pending(book.title)
                 if pending:
@@ -43,12 +45,23 @@ class GenerateBookCardsUseCase:
                     return uploaded
 
             highlight_dicts = [self._to_dict(h) for h in highlights if h.is_valid()]
-            cards = self._generator.generate_cards(highlight_dicts, book.title)
+            result = self._generator.generate_cards_with_review(
+                highlight_dicts, book.title
+            )
+            cards = result.passed
+
+            # 先落地再上傳，上傳失敗時下次可續傳。被審核退回的卡一併留存
+            # （只作紀錄，load_pending 不會撿它們）。
+            path = (
+                self._store.save(book.title, cards, result.rejected)
+                if self._store else None
+            )
             if not cards:
+                self._logger.info(
+                    f"{book.title}: 沒有卡片通過審核（退回 {len(result.rejected)} 張），不上傳"
+                )
                 return 0
 
-            # 先落地再上傳，上傳失敗時下次可續傳。
-            path = self._store.save(book.title, cards) if self._store else None
             uploaded = self._card_repo.upload_cards(
                 cards, book.title, source_page_id, book.percent_read
             )

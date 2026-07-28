@@ -2,9 +2,12 @@
 Zettelkasten Card Generator
 
 This module generates Zettelkasten (slip-box) style note cards from book highlights.
-It uses a dual-layer LLM architecture:
-- Ollama (Gemma) for fast local generation of card drafts
-- Gemini API for quality review and refinement
+It uses two *different* local models so that review is genuinely independent of
+generation (cross-model review, not self-grading):
+
+- `OLLAMA_MODEL` drafts the cards.
+- `OLLAMA_REVIEW_MODEL` reviews them on four axes (一致性 / 正確性 / 分享性 /
+  知識最小片段性). Only cards that pass are handed back for upload.
 """
 
 import json
@@ -23,6 +26,119 @@ import requests
 logger = logging.getLogger('kobo_notion_sync')
 
 
+def _ollama_generate(
+    prompt: str,
+    *,
+    api_url: str,
+    model: str,
+    timeout_s: int,
+    temperature: float,
+    num_predict: int,
+    num_ctx: Optional[int] = None,
+    keep_alive: Optional[str] = None,
+    think: Optional[bool] = None,
+    salvage_partial: bool = False,
+    label: str = "ollama",
+) -> Optional[str]:
+    """One streaming POST to Ollama `/api/generate`, returning the accumulated text.
+
+    Shared by card generation, classification and review so the hard-won details
+    live in exactly one place:
+
+    - `think=False` disables hidden reasoning on thinking models (gemma4:e4b
+      otherwise burns the whole `num_predict` budget before emitting anything);
+      a 400 response means the server rejects the parameter, so we retry without it.
+    - in-stream `{"error": ...}` chunks are surfaced instead of silently truncating.
+    - `done_reason == "length"` with empty output is called out explicitly.
+
+    Returns None when nothing usable came back. `salvage_partial=True` returns
+    whatever streamed in before a timeout/error — only for callers whose parser
+    can safely handle a truncated response.
+    """
+    options: Dict[str, object] = {"temperature": temperature, "num_predict": num_predict}
+    if num_ctx is not None:
+        options["num_ctx"] = num_ctx
+
+    payload: Dict[str, object] = {
+        "model": model,
+        "prompt": prompt,
+        "stream": True,
+        "options": options,
+    }
+    if keep_alive is not None:
+        payload["keep_alive"] = keep_alive
+    if think is not None:
+        payload["think"] = think
+
+    accumulated: List[str] = []
+    start_time = time.monotonic()
+    logger.debug(
+        f"Ollama {label} request → url={api_url} model={model} "
+        f"prompt_chars={len(prompt)} timeout={timeout_s}s num_predict={num_predict}"
+    )
+
+    def _partial() -> Optional[str]:
+        text = "".join(accumulated)
+        return text if (salvage_partial and text) else None
+
+    try:
+        response = requests.post(api_url, json=payload, timeout=timeout_s, stream=True)
+        if response.status_code == 400 and "think" in payload:
+            # older Ollama / non-thinking model may reject the parameter
+            logger.info(f"Ollama {label}: 不接受 think 參數，改以預設模式重試")
+            payload.pop("think")
+            response = requests.post(api_url, json=payload, timeout=timeout_s, stream=True)
+
+        if response.status_code != 200:
+            elapsed = time.monotonic() - start_time
+            logger.error(
+                f"Ollama {label} error: status={response.status_code} "
+                f"elapsed={elapsed:.1f}s body={response.text[:500]}"
+            )
+            return None
+
+        for line in response.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+            chunk = json.loads(line)
+            if chunk.get("error"):
+                logger.error(f"Ollama {label} in-stream error: {chunk['error']}")
+                break
+            accumulated.append(chunk.get("response", ""))
+            if chunk.get("done"):
+                if chunk.get("done_reason") == "length" and not "".join(accumulated).strip():
+                    logger.warning(
+                        f"Ollama {label} hit num_predict with empty output "
+                        "(thinking-model budget exhausted?)"
+                    )
+                break
+
+        generated_text = "".join(accumulated)
+        elapsed = time.monotonic() - start_time
+        logger.debug(
+            f"Ollama {label} response ← elapsed={elapsed:.1f}s chars={len(generated_text)}"
+        )
+        return generated_text
+
+    except requests.exceptions.Timeout:
+        elapsed = time.monotonic() - start_time
+        partial = "".join(accumulated) if accumulated else "<no bytes received>"
+        logger.error(
+            f"Ollama {label} timeout after {elapsed:.1f}s "
+            f"(url={api_url} model={model} prompt_chars={len(prompt)})"
+        )
+        logger.error(f"Partial response before timeout ({len(partial)} chars): {partial[:500]!r}")
+        return _partial()
+    except requests.exceptions.ConnectionError as e:
+        elapsed = time.monotonic() - start_time
+        logger.error(f"Cannot connect to Ollama for {label} after {elapsed:.1f}s (url={api_url}): {e}")
+        return None
+    except Exception as e:  # noqa: BLE001 — one bad response must not kill the run
+        elapsed = time.monotonic() - start_time
+        logger.exception(f"Error in Ollama {label} after {elapsed:.1f}s: {e}")
+        return _partial()
+
+
 @dataclass
 class ZettelkastenCard:
     """Represents a single Zettelkasten note card"""
@@ -32,11 +148,15 @@ class ZettelkastenCard:
     source_highlight: str             # Original highlight text
     chapter_reference: str            # Source chapter name
     chapter_progress: float           # Reading progress (0.0 - 1.0)
-    quality_score: int = 0            # Quality score from Gemini review (1-10)
-    revision_notes: str = ""          # Notes from Gemini review
     source_bookmark_id: str = ""      # Kobo BookmarkID of the source highlight
     tags: List[str] = field(default_factory=list)  # Free concept tags (2-3) → Key Word
     categories: List[str] = field(default_factory=list)  # Fixed Tags classification (1-2)
+    # --- review gate (local only; never written to Notion) ---
+    review_status: str = "pending"    # pending / passed / rejected
+    review_scores: Dict[str, int] = field(default_factory=dict)  # 四維 1-5
+    review_notes: str = ""            # reviewer's reason / revision direction
+    review_model: str = ""            # which local model judged this card
+    regenerated: bool = False         # was this the post-rejection second attempt
     created_at: datetime = field(default_factory=datetime.now)
 
     def to_dict(self) -> Dict:
@@ -48,11 +168,14 @@ class ZettelkastenCard:
             'source_highlight': self.source_highlight,
             'chapter_reference': self.chapter_reference,
             'chapter_progress': self.chapter_progress,
-            'quality_score': self.quality_score,
-            'revision_notes': self.revision_notes,
             'source_bookmark_id': self.source_bookmark_id,
             'tags': self.tags,
             'categories': self.categories,
+            'review_status': self.review_status,
+            'review_scores': self.review_scores,
+            'review_notes': self.review_notes,
+            'review_model': self.review_model,
+            'regenerated': self.regenerated,
             'created_at': self.created_at.isoformat()
         }
 
@@ -71,11 +194,14 @@ class ZettelkastenCard:
             source_highlight=d.get('source_highlight', ''),
             chapter_reference=d.get('chapter_reference', ''),
             chapter_progress=d.get('chapter_progress', 0.0) or 0.0,
-            quality_score=d.get('quality_score', 0) or 0,
-            revision_notes=d.get('revision_notes', '') or '',
             source_bookmark_id=d.get('source_bookmark_id', '') or '',
             tags=list(d.get('tags') or []),
             categories=list(d.get('categories') or []),
+            review_status=d.get('review_status', 'pending') or 'pending',
+            review_scores=dict(d.get('review_scores') or {}),
+            review_notes=d.get('review_notes', '') or '',
+            review_model=d.get('review_model', '') or '',
+            regenerated=bool(d.get('regenerated', False)),
             created_at=created_at,
         )
 
@@ -228,13 +354,23 @@ class ZettelkastenLLMEnhancer:
         self.api_url = api_url or os.getenv('OLLAMA_API_URL', 'http://localhost:11434/api/generate')
         self.model = model or os.getenv('OLLAMA_MODEL', 'gemma4:31b')
 
-    def generate_card(self, highlight: Dict, book_title: str = "") -> Optional[ZettelkastenCard]:
+    def generate_card(
+        self,
+        highlight: Dict,
+        book_title: str = "",
+        *,
+        book_theme: str = "",
+        revision_hint: str = "",
+    ) -> Optional[ZettelkastenCard]:
         """
         Generate a Zettelkasten card from a highlight using Ollama.
 
         Returns a ZettelkastenCard with:
         - Title: 5-15 characters summarizing the core concept
         - Content: 100-150 characters atomic note in own words
+
+        `book_theme` and `revision_hint` are optional context used when the
+        review gate sends a rejected card back for a second attempt.
         """
         text = highlight.get('text', '').strip()
         chapter = highlight.get('chapter_name', 'Unknown')
@@ -244,111 +380,64 @@ class ZettelkastenLLMEnhancer:
         if not text:
             return None
 
-        prompt = self._build_prompt(text, book_title, annotation)
-
-        accumulated: List[str] = []
-        start_time = time.monotonic()
-        timeout_s = int(os.getenv('OLLAMA_TIMEOUT_SECONDS', '300'))
-        keep_alive = os.getenv('OLLAMA_KEEP_ALIVE', '30m')
-        num_predict = int(os.getenv('OLLAMA_NUM_PREDICT', '2000'))
-
-        logger.debug(
-            f"Ollama request → url={self.api_url} model={self.model} "
-            f"prompt_chars={len(prompt)} timeout={timeout_s}s num_predict={num_predict}"
+        prompt = self._build_prompt(
+            text, book_title, annotation,
+            book_theme=book_theme, revision_hint=revision_hint,
         )
 
-        try:
-            response = requests.post(
-                self.api_url,
-                json={
-                    "model": self.model,
-                    "prompt": prompt,
-                    "stream": True,
-                    "keep_alive": keep_alive,
-                    "options": {
-                        "temperature": 0.7,
-                        "num_predict": num_predict,
-                    },
-                },
-                timeout=timeout_s,
-                stream=True,
-            )
+        generated_text = _ollama_generate(
+            prompt,
+            api_url=self.api_url,
+            model=self.model,
+            timeout_s=int(os.getenv('OLLAMA_TIMEOUT_SECONDS', '300')),
+            temperature=0.7,
+            num_predict=int(os.getenv('OLLAMA_NUM_PREDICT', '2000')),
+            keep_alive=os.getenv('OLLAMA_KEEP_ALIVE', '30m'),
+            label="card",
+        )
+        if not generated_text:
+            return None
 
-            if response.status_code == 200:
-                for line in response.iter_lines(decode_unicode=True):
-                    if not line:
-                        continue
-                    chunk = json.loads(line)
-                    accumulated.append(chunk.get("response", ""))
-                    if chunk.get("done"):
-                        break
+        title, content = self._parse_response(generated_text, text)
+        if not (title and content):
+            return None
 
-                generated_text = "".join(accumulated)
-                elapsed = time.monotonic() - start_time
-                logger.debug(
-                    f"Ollama response ← status=200 elapsed={elapsed:.1f}s "
-                    f"chars={len(generated_text)}"
-                )
-
-                title, content = self._parse_response(generated_text, text)
-
-                if title and content:
-                    card_id = f"card_{datetime.now().strftime('%Y%m%d%H%M%S')}_{hash(text) % 10000:04d}"
-                    return ZettelkastenCard(
-                        id=card_id,
-                        title=title,
-                        content=content,
-                        source_highlight=text,
-                        chapter_reference=chapter,
-                        chapter_progress=progress or 0.0,
-                        source_bookmark_id=str(highlight.get('bookmark_id') or ''),
-                        tags=self._extract_tags(generated_text),
-                    )
-            else:
-                elapsed = time.monotonic() - start_time
-                logger.error(
-                    f"Ollama API error: status={response.status_code} "
-                    f"elapsed={elapsed:.1f}s body={response.text[:500]}"
-                )
-
-        except requests.exceptions.Timeout:
-            elapsed = time.monotonic() - start_time
-            partial = "".join(accumulated) if accumulated else "<no bytes received>"
-            logger.error(
-                f"Ollama API timeout after {elapsed:.1f}s "
-                f"(url={self.api_url} model={self.model} prompt_chars={len(prompt)})"
-            )
-            logger.error(
-                f"Partial response before timeout ({len(partial)} chars): {partial!r}"
-            )
-        except requests.exceptions.ConnectionError as e:
-            elapsed = time.monotonic() - start_time
-            logger.error(
-                f"Cannot connect to Ollama after {elapsed:.1f}s "
-                f"(url={self.api_url}): {e}"
-            )
-        except Exception as e:
-            elapsed = time.monotonic() - start_time
-            logger.exception(
-                f"Error generating card with Ollama after {elapsed:.1f}s: {e}"
-            )
-
-        return None
+        card_id = f"card_{datetime.now().strftime('%Y%m%d%H%M%S')}_{hash(text) % 10000:04d}"
+        return ZettelkastenCard(
+            id=card_id,
+            title=title,
+            content=content,
+            source_highlight=text,
+            chapter_reference=chapter,
+            chapter_progress=progress or 0.0,
+            source_bookmark_id=str(highlight.get('bookmark_id') or ''),
+            tags=self._extract_tags(generated_text),
+        )
 
     def _build_prompt(self, highlight_text: str, book_title: str = "",
-                      annotation: str = "") -> str:
+                      annotation: str = "", *, book_theme: str = "",
+                      revision_hint: str = "") -> str:
         """Build the prompt for card generation"""
         book_context = f"書名：{book_title}\n" if book_title else ""
         annotation_context = (
             f"\n讀者的個人註記（請務必納入這個觀點）：\n{annotation}\n"
             if annotation and annotation.strip() else ""
         )
+        theme_context = (
+            f"\n本書整體主軸（請讓這張卡與整本書的方向一致）：\n{book_theme.strip()}\n"
+            if book_theme and book_theme.strip() else ""
+        )
+        revision_context = (
+            f"\n⚠️ 上一版卡片已被審核退回，退回理由如下，請針對這些問題重寫：\n"
+            f"{revision_hint.strip()}\n"
+            if revision_hint and revision_hint.strip() else ""
+        )
 
         return f"""你是一位卡片盒筆記專家。請為以下書籍劃線生成一張卡片筆記。
 
 {book_context}劃線內容：
 {highlight_text}
-{annotation_context}
+{annotation_context}{theme_context}{revision_context}
 請生成卡片筆記，格式如下：
 【標題】5-15個字，概括這段話的核心概念
 【內容】100-150個字，用你自己的話重新闡述這個觀點的關鍵洞見，要確保這是一個完整、獨立的原子筆記
@@ -361,6 +450,8 @@ class ZettelkastenLLMEnhancer:
 4. 使用繁體中文，符合台灣用語習慣
 5. 確保內容是獨立完整的，不需要回頭看原文也能理解
 6. 標籤要用抽象的概念詞，不要用書名或章節名
+7. 標籤之間只能用頓號（、）分隔，每個標籤 2-6 個字。絕對不要用冒號、破折號、
+   中點或句號把標籤串在一起（❌「語言演化：社交結構」❌「習慣-複利」✅「習慣、複利」）
 
 請直接輸出，不要加任何解釋："""
 
@@ -446,22 +537,36 @@ class ZettelkastenLLMEnhancer:
         return title, content
 
     _TAG_LINE = re.compile(r'【標籤】\s*(.+?)(?=【|###|\n\n|$)', re.DOTALL)
-    _TAG_SPLIT = re.compile(r'[、,，/|｜\s]+')
+    # Separators the model actually uses instead of the 頓號 we ask for. Observed
+    # in real output: "語言演化：社交結構：謊言藝術"（全形冒號）、
+    # "資本結構—負債比率—金融風險"（破折號）、"・說服論述・故事架構"（中點）、
+    # "環境心理學。習慣建立。行動科學"（句號）、"習慣-複利-一致性"（連字號）。
+    _TAG_SPLIT = re.compile(r'[、,，/|｜:：;；。．.・·\-‑–—―−~～\s]+')
+    # Punctuation to shave off a tag's edges once it has been split out.
+    _TAG_TRIM = '#*「」『』〈〉()（）[]【】"\'`'
+    # A "tag" longer than this is a sentence the model failed to split, not a concept.
+    _TAG_MAX_LEN = 15
 
     @classmethod
     def _extract_tags(cls, text: str, limit: int = 3) -> List[str]:
-        """Pull 2-3 concept tags from a 【標籤】 line; [] if absent."""
+        """Pull 2-3 concept tags from a 【標籤】 line; [] if absent.
+
+        Models routinely ignore "separate with 、" and glue the tags together
+        with colons, dashes, middle dots or full stops. Splitting on all of them
+        is the difference between three browsable concepts and one unusable
+        mega-tag in the Key Word column.
+        """
         if not text:
             return []
         match = cls._TAG_LINE.search(text)
         if not match:
             return []
-        raw = match.group(1).strip()
         tags: List[str] = []
-        for part in cls._TAG_SPLIT.split(raw):
-            tag = part.strip().lstrip('#').replace('，', '').replace(',', '')
-            if tag and tag not in tags:
-                tags.append(tag)
+        for part in cls._TAG_SPLIT.split(match.group(1).strip()):
+            tag = part.strip().strip(cls._TAG_TRIM).strip()
+            if not tag or len(tag) > cls._TAG_MAX_LEN or tag in tags:
+                continue
+            tags.append(tag)
             if len(tags) >= limit:
                 break
         return tags
@@ -559,66 +664,23 @@ class ZettelkastenLLMEnhancer:
             return
 
         prompt = self._build_classification_prompt(cards, categories)
-        timeout_s = int(os.getenv('OLLAMA_BATCH_TIMEOUT_SECONDS', '600'))
-        keep_alive = os.getenv('OLLAMA_KEEP_ALIVE', '30m')
-        num_ctx = int(os.getenv('OLLAMA_BATCH_NUM_CTX', '16384'))
-
-        accumulated: List[str] = []
-        start_time = time.monotonic()
         logger.info(
             f"Ollama classify request → model={self.model} cards={len(cards)} "
             f"prompt_chars={len(prompt)}"
         )
-        payload = {
-            "model": self.model,
-            "prompt": prompt,
-            "stream": True,
-            "keep_alive": keep_alive,
-            # thinking models (e.g. gemma4:e4b) silently burn the whole
-            # num_predict budget on hidden reasoning before any visible output
-            # (done_reason=length, response "") — disable it for this short
-            # structured task.
-            "think": False,
-            "options": {"temperature": 0.3, "num_predict": 1000, "num_ctx": num_ctx},
-        }
-        try:
-            response = requests.post(
-                self.api_url, json=payload, timeout=timeout_s, stream=True,
-            )
-            if response.status_code == 400 and "think" in payload:
-                # older Ollama / non-thinking model may reject the parameter
-                logger.info("Ollama 不接受 think 參數，改以預設模式重試")
-                payload.pop("think")
-                response = requests.post(
-                    self.api_url, json=payload, timeout=timeout_s, stream=True,
-                )
-            if response.status_code != 200:
-                logger.error(
-                    f"Ollama classify error: status={response.status_code} "
-                    f"body={response.text[:300]}"
-                )
-                return
-            for line in response.iter_lines(decode_unicode=True):
-                if not line:
-                    continue
-                chunk = json.loads(line)
-                if chunk.get("error"):
-                    logger.error(f"Ollama classify in-stream error: {chunk['error']}")
-                    break
-                accumulated.append(chunk.get("response", ""))
-                if chunk.get("done"):
-                    if chunk.get("done_reason") == "length" and not "".join(accumulated).strip():
-                        logger.warning(
-                            "Ollama classify hit num_predict with empty output "
-                            "(thinking-model budget exhausted?)"
-                        )
-                    break
-        except Exception as e:  # noqa: BLE001 — classification is best-effort
-            elapsed = time.monotonic() - start_time
-            logger.error(f"Ollama classify failed after {elapsed:.1f}s: {e}")
-            # fall through: parse whatever streamed in before the error, if any
-
-        raw = "".join(accumulated)
+        raw = _ollama_generate(
+            prompt,
+            api_url=self.api_url,
+            model=self.model,
+            timeout_s=int(os.getenv('OLLAMA_BATCH_TIMEOUT_SECONDS', '600')),
+            temperature=0.3,
+            num_predict=1000,
+            num_ctx=int(os.getenv('OLLAMA_BATCH_NUM_CTX', '16384')),
+            keep_alive=os.getenv('OLLAMA_KEEP_ALIVE', '30m'),
+            think=False,
+            salvage_partial=True,
+            label="classify",
+        ) or ""
         logger.debug(f"Ollama classify raw response ({len(raw)} chars): {raw[:500]}")
         parsed = self._parse_classification(raw, len(cards), categories)
         assigned = 0
@@ -664,6 +726,8 @@ class ZettelkastenLLMEnhancer:
 3. {n} 張卡都要給，不可省略、不可合併
 4. 分隔符只用 ### CARD_編號，不要加其他註解、結語或總結
 5. 標題 5-15 個字，內容 100-150 個字
+6. 【標籤】之間只能用頓號（、）分隔，每個標籤 2-6 個字。絕對不要用冒號、破折號、
+   中點或句號把標籤串在一起（❌「語言演化：社交結構」❌「習慣-複利」✅「習慣、複利」）
 
 請直接輸出，不要在格式外加任何解釋："""
 
@@ -727,79 +791,32 @@ class ZettelkastenLLMEnhancer:
             return []
 
         prompt = self._build_batch_prompt(highlights, book_title)
-        timeout_s = int(os.getenv('OLLAMA_BATCH_TIMEOUT_SECONDS', '600'))
-        keep_alive = os.getenv('OLLAMA_KEEP_ALIVE', '30m')
-        num_predict = int(os.getenv('OLLAMA_BATCH_NUM_PREDICT', '-1'))
         num_ctx = int(os.getenv('OLLAMA_BATCH_NUM_CTX', '16384'))
-
-        accumulated: List[str] = []
-        start_time = time.monotonic()
 
         logger.info(
             f"Ollama batch request → model={self.model} highlights={len(highlights)} "
-            f"prompt_chars={len(prompt)} num_ctx={num_ctx} timeout={timeout_s}s"
+            f"prompt_chars={len(prompt)} num_ctx={num_ctx}"
         )
 
-        try:
-            response = requests.post(
-                self.api_url,
-                json={
-                    "model": self.model,
-                    "prompt": prompt,
-                    "stream": True,
-                    "keep_alive": keep_alive,
-                    "options": {
-                        "temperature": 0.7,
-                        "num_predict": num_predict,
-                        "num_ctx": num_ctx,
-                    },
-                },
-                timeout=timeout_s,
-                stream=True,
-            )
-
-            if response.status_code != 200:
-                elapsed = time.monotonic() - start_time
-                logger.error(
-                    f"Ollama batch error: status={response.status_code} "
-                    f"elapsed={elapsed:.1f}s body={response.text[:500]}"
-                )
-                return [None] * len(highlights)
-
-            for line in response.iter_lines(decode_unicode=True):
-                if not line:
-                    continue
-                chunk = json.loads(line)
-                accumulated.append(chunk.get("response", ""))
-                if chunk.get("done"):
-                    break
-
-            generated_text = "".join(accumulated)
-            elapsed = time.monotonic() - start_time
-            logger.info(
-                f"Ollama batch response ← elapsed={elapsed:.1f}s "
-                f"chars={len(generated_text)}"
-            )
-            return self._parse_batch_response(generated_text, highlights)
-
-        except requests.exceptions.Timeout:
-            elapsed = time.monotonic() - start_time
-            partial = "".join(accumulated) if accumulated else "<no bytes received>"
-            logger.error(
-                f"Ollama batch timeout after {elapsed:.1f}s "
-                f"(highlights={len(highlights)} prompt_chars={len(prompt)})"
-            )
-            logger.error(f"Partial response before timeout ({len(partial)} chars): {partial[:500]!r}")
-            # Try to salvage whatever cards made it through before timeout.
-            if accumulated:
-                return self._parse_batch_response("".join(accumulated), highlights)
+        # salvage_partial: a truncated batch response still yields the cards that
+        # made it through; _parse_batch_response returns None for the rest.
+        generated_text = _ollama_generate(
+            prompt,
+            api_url=self.api_url,
+            model=self.model,
+            timeout_s=int(os.getenv('OLLAMA_BATCH_TIMEOUT_SECONDS', '600')),
+            temperature=0.7,
+            num_predict=int(os.getenv('OLLAMA_BATCH_NUM_PREDICT', '-1')),
+            num_ctx=num_ctx,
+            keep_alive=os.getenv('OLLAMA_KEEP_ALIVE', '30m'),
+            salvage_partial=True,
+            label="batch",
+        )
+        if not generated_text:
             return [None] * len(highlights)
-        except requests.exceptions.ConnectionError as e:
-            logger.error(f"Cannot connect to Ollama for batch: {e}")
-            return [None] * len(highlights)
-        except Exception as e:
-            logger.exception(f"Error in batch generation: {e}")
-            return [None] * len(highlights)
+
+        logger.info(f"Ollama batch response ← chars={len(generated_text)}")
+        return self._parse_batch_response(generated_text, highlights)
 
     def batch_generate(self, highlights: List[Dict], book_title: str = "") -> List[ZettelkastenCard]:
         """Generate cards for multiple highlights via a single batched Ollama call.
@@ -853,139 +870,306 @@ class ZettelkastenLLMEnhancer:
         return produced
 
 
-class GeminiReviewer:
-    """Uses Gemini API to review and refine card quality"""
+@dataclass
+class CardReview:
+    """Verdict from the local review model for one card.
 
-    def __init__(self, api_key: str = None, model: str = None, review_threshold: int = None):
-        self.api_key = api_key or os.getenv('GEMINI_API_KEY')
-        self.model = model or os.getenv('GEMINI_MODEL', 'gemini-2.0-flash')
-        self.review_threshold = review_threshold or int(os.getenv('GEMINI_REVIEW_THRESHOLD', '6'))
-        self.api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
+    Four axes, each 1-5. A card passes only when *every* axis clears the
+    threshold: a card that is factually impeccable but crams three ideas into
+    one note is still not a Zettelkasten card, so an average would hide it.
+    """
+    consistency: int    # 標題↔內容↔原文不矛盾，且與全書主軸同向、不與其他卡重複
+    correctness: int    # 忠於原文，沒有推論出原文沒說的事
+    shareability: int   # 離開原書脈絡也讀得懂、值得單獨分享
+    atomicity: int      # 只講一個概念，是最小知識片段
+    notes: str = ""
+    model: str = ""
 
-    def is_available(self) -> bool:
-        """Check if Gemini API is configured"""
-        return bool(self.api_key)
+    AXES = ('consistency', 'correctness', 'shareability', 'atomicity')
 
-    def review_and_refine(self, card: ZettelkastenCard) -> ZettelkastenCard:
-        """
-        Review a single card and refine if quality is below threshold.
+    def scores(self) -> Dict[str, int]:
+        return {axis: getattr(self, axis) for axis in self.AXES}
 
-        Returns the card with updated quality_score and potentially refined content.
-        """
-        if not self.is_available():
-            logger.warning("Gemini API not configured, skipping review")
-            card.quality_score = 7  # Default score when review is skipped
-            return card
+    def passed(self, threshold: int) -> bool:
+        return all(getattr(self, axis) >= threshold for axis in self.AXES)
 
-        prompt = self._build_review_prompt(card)
+    def summary(self) -> str:
+        return (
+            f"一致性 {self.consistency} / 正確性 {self.correctness} / "
+            f"分享性 {self.shareability} / 最小片段性 {self.atomicity}"
+        )
 
-        try:
-            response = requests.post(
-                f"{self.api_url}?key={self.api_key}",
-                headers={"Content-Type": "application/json"},
-                json={
-                    "contents": [{
-                        "parts": [{"text": prompt}]
-                    }],
-                    "generationConfig": {
-                        "temperature": 0.3,
-                        "maxOutputTokens": 1000
-                    }
-                },
-                timeout=30
+
+class CardReviewer:
+    """Reviews draft cards with a *different* local model than the one that wrote them.
+
+    Cross-model on purpose: a model grading its own output mostly rediscovers
+    its own blind spots. Two stages per book:
+
+    1. `summarize_book` — one call distilling the book's overall direction, so
+       that single-card review can tell "off-topic for this book" from "fine".
+    2. `review` — one call per card, judging four axes against the source
+       highlight, the book theme and the sibling card titles.
+    """
+
+    _DEFAULT_REVIEW_MODEL = 'qwen3:8b'
+
+    def __init__(self, api_url: str = None, model: str = None,
+                 threshold: int = None, generator_model: str = None):
+        self.api_url = api_url or os.getenv('OLLAMA_API_URL', 'http://localhost:11434/api/generate')
+        self.model = model or os.getenv('OLLAMA_REVIEW_MODEL', self._DEFAULT_REVIEW_MODEL)
+        self.threshold = (
+            threshold if threshold is not None
+            else int(os.getenv('ZETTELKASTEN_REVIEW_MIN_SCORE', '4'))
+        )
+        self.timeout_s = int(os.getenv('OLLAMA_REVIEW_TIMEOUT_SECONDS', '300'))
+        logger.info(
+            f"卡片審核閘門：產卡模型={generator_model or '?'} 審核模型={self.model} "
+            f"每項門檻={self.threshold}/5"
+        )
+        if generator_model and generator_model == self.model:
+            logger.warning(
+                f"審核模型與產卡模型相同（{self.model}）— 等於讓模型改自己的考卷。"
+                "建議把 OLLAMA_REVIEW_MODEL 設成另一個地端模型。"
             )
 
-            if response.status_code == 200:
-                result = response.json()
-                generated_text = result.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+    # ----- availability -----
 
-                reviewed_card = self._parse_review_response(generated_text, card)
-                return reviewed_card
-            else:
-                logger.error(f"Gemini API error: {response.status_code} - {response.text}")
-                card.quality_score = 7
-                return card
+    def _tags_url(self) -> str:
+        return self.api_url.replace('/api/generate', '/api/tags')
 
-        except Exception as e:
-            logger.error(f"Error reviewing card with Gemini: {str(e)}")
-            card.quality_score = 7
-            return card
+    def is_available(self) -> bool:
+        """True only if Ollama answers *and* the review model is actually pulled.
 
-    def _build_review_prompt(self, card: ZettelkastenCard) -> str:
-        """Build the review prompt for Gemini"""
-        return f"""你是卡片筆記品質審核員。請審核以下卡片筆記，確保：
-1. 標題精準概括核心概念（5-20字）
-2. 內容是獨立完整的原子筆記（100-150字）
-3. 用語清晰、邏輯通順
-4. 忠實於原文意涵
+        Distinguishing "service down" from "model not pulled" matters: both are
+        hard failures for the gate, but only one is fixed by `ollama pull`.
+        """
+        url = self._tags_url()
+        try:
+            response = requests.get(url, timeout=5)
+        except requests.RequestException as e:
+            logger.error(f"審核模型不可用：連不上 Ollama（{url}）：{e}")
+            return False
+        if response.status_code != 200:
+            logger.error(f"審核模型不可用：Ollama {url} 回 {response.status_code}")
+            return False
+        try:
+            installed = [m.get('name', '') for m in (response.json().get('models') or [])]
+        except ValueError:
+            logger.error(f"審核模型不可用：{url} 回傳非 JSON")
+            return False
+        if not self._model_installed(self.model, installed):
+            logger.error(
+                f"審核模型不可用：{self.model} 尚未安裝"
+                f"（已安裝：{'、'.join(installed) or '無'}）。"
+                f"請先執行 `ollama pull {self.model}`。"
+            )
+            return False
+        return True
 
-原始劃線：
+    @staticmethod
+    def _model_installed(model: str, installed: List[str]) -> bool:
+        """`qwen3:8b` must match exactly; a bare `qwen3` also matches `qwen3:latest`."""
+        if not model:
+            return False
+        if model in installed:
+            return True
+        if ':' not in model:
+            return any(name.split(':')[0] == model for name in installed)
+        return False
+
+    # ----- stage 1: book theme -----
+
+    def summarize_book(self, cards: List[ZettelkastenCard], book_title: str = "") -> str:
+        """Distil the book's overall direction from its draft cards.
+
+        Returns "" when the model gives nothing back — the caller degrades to
+        using only the sibling titles as context. The service being reachable
+        means this is not a gate failure, just thinner context.
+        """
+        if not cards:
+            return ""
+        raw = _ollama_generate(
+            self._build_theme_prompt(cards, book_title),
+            api_url=self.api_url,
+            model=self.model,
+            timeout_s=self.timeout_s,
+            temperature=0.2,
+            num_predict=800,
+            num_ctx=int(os.getenv('OLLAMA_BATCH_NUM_CTX', '16384')),
+            keep_alive=os.getenv('OLLAMA_KEEP_ALIVE', '30m'),
+            think=False,
+            salvage_partial=True,
+            label="theme",
+        )
+        theme = ZettelkastenLLMEnhancer._strip_thinking(raw or "").strip()
+        if not theme:
+            logger.warning(f"'{book_title}' 全書主軸抽取失敗，審核改以卡片標題清單為脈絡")
+        else:
+            logger.info(f"'{book_title}' 全書主軸：{theme[:120]}")
+        return theme
+
+    @staticmethod
+    def _build_theme_prompt(cards: List[ZettelkastenCard], book_title: str = "") -> str:
+        book_context = f"書名：{book_title}\n\n" if book_title else ""
+        blocks = "\n".join(
+            f"{i}. {c.title}｜{c.content}" for i, c in enumerate(cards, start=1)
+        )
+        return f"""你是一位知識編輯。以下是從同一本書擷取出來的 {len(cards)} 張卡片筆記草稿。
+
+{book_context}{blocks}
+
+請用 150 字以內歸納：
+1. 這本書的核心主軸是什麼（一到兩句話）
+2. 反覆出現的核心概念有哪些（條列 3-5 個關鍵詞）
+
+只輸出歸納結果，不要評論個別卡片，不要加開場白："""
+
+    # ----- stage 2: per-card review -----
+
+    def review(
+        self,
+        card: ZettelkastenCard,
+        *,
+        book_title: str = "",
+        book_theme: str = "",
+        sibling_titles: Optional[List[str]] = None,
+    ) -> Optional[CardReview]:
+        """Judge one card. None means the review itself failed (≠ a low score)."""
+        raw = _ollama_generate(
+            self._build_review_prompt(card, book_title, book_theme, sibling_titles or []),
+            api_url=self.api_url,
+            model=self.model,
+            timeout_s=self.timeout_s,
+            temperature=0.2,
+            num_predict=1000,
+            num_ctx=int(os.getenv('OLLAMA_BATCH_NUM_CTX', '16384')),
+            keep_alive=os.getenv('OLLAMA_KEEP_ALIVE', '30m'),
+            think=False,
+            salvage_partial=True,
+            label="review",
+        )
+        if not raw:
+            return None
+        review = self._parse_review(raw)
+        if review is None:
+            logger.warning(f"審核回應無法解析（卡片：{card.title}）：{raw[:200]!r}")
+            return None
+        review.model = self.model
+        return review
+
+    def _build_review_prompt(
+        self,
+        card: ZettelkastenCard,
+        book_title: str,
+        book_theme: str,
+        sibling_titles: List[str],
+    ) -> str:
+        book_context = f"書名：{book_title}\n" if book_title else ""
+        theme_section = (
+            f"\n本書整體主軸：\n{book_theme.strip()}\n"
+            if book_theme and book_theme.strip() else ""
+        )
+        siblings = [t for t in sibling_titles if t]
+        sibling_section = (
+            "\n同一本書其他卡片的標題（用來判斷這張卡是否離題或與別張重複）：\n"
+            + "\n".join(f"- {t}" for t in siblings) + "\n"
+            if siblings else ""
+        )
+        return f"""你是嚴格的卡片盒筆記審核員。請審核以下這張卡片，決定它是否夠格成為一則獨立的知識卡片。
+
+{book_context}{theme_section}{sibling_section}
+原始劃線（唯一的事實依據）：
 {card.source_highlight}
 
-初稿標題：{card.title}
+卡片標題：{card.title}
 
-初稿內容：
+卡片內容：
 {card.content}
 
-請以 JSON 格式輸出審核結果（只輸出 JSON，不要加其他文字）：
-{{
-  "title": "優化後的標題（如無需修改則保持原樣）",
-  "content": "優化後的內容（如無需修改則保持原樣）",
-  "quality_score": 1到10的評分,
-  "revision_notes": "修改說明（如無修改則為空字串）"
-}}"""
+請針對四個面向各給 1 到 5 分（1=嚴重不合格，3=剛好可接受，5=優秀）：
 
-    def _parse_review_response(self, response_text: str, original_card: ZettelkastenCard) -> ZettelkastenCard:
-        """Parse the Gemini review response"""
-        try:
-            # Try to extract JSON from the response
-            json_match = re.search(r'\{[^{}]*\}', response_text, re.DOTALL)
-            if json_match:
-                review_data = json.loads(json_match.group())
+1. consistency（一致性）：標題、內容、原始劃線三者不互相矛盾；且這張卡與「本書整體主軸」方向一致，沒有離題，也沒有和其他卡片重複同一個論點。
+2. correctness（正確性）：內容忠於原始劃線的意涵，沒有加入原文沒說的因果、數據或結論，沒有誤讀，沒有混入無關語言或雜訊字元。
+3. shareability（分享性）：不看原書脈絡也讀得懂，是一段可以單獨拿出來分享的完整想法，不是需要補充才成立的殘句。
+4. atomicity（知識最小片段性）：這張卡只講一個概念。若同時塞了兩個以上可以各自獨立成卡的概念，這項最多給 2 分。
 
-                quality_score = review_data.get('quality_score', 7)
-                revision_notes = review_data.get('revision_notes', '')
+評分要嚴格，不要因為文句通順就給高分。
 
-                # Only apply refinements if quality is below threshold
-                if quality_score < self.review_threshold:
-                    original_card.title = review_data.get('title', original_card.title)
-                    original_card.content = review_data.get('content', original_card.content)
-                    logger.info(f"Card refined by Gemini (score: {quality_score})")
-                else:
-                    logger.info(f"Card quality acceptable (score: {quality_score}), keeping original")
+只輸出以下 JSON，不要加任何說明文字，不要加 markdown 標記：
+{{"consistency": 分數, "correctness": 分數, "shareability": 分數, "atomicity": 分數, "notes": "若有任一項低於 3 分，具體說明問題出在哪裡、應該怎麼改寫；否則留空字串"}}"""
 
-                original_card.quality_score = quality_score
-                original_card.revision_notes = revision_notes
+    # ----- parsing (pure, unit-tested) -----
 
-        except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse Gemini response as JSON: {e}")
-            original_card.quality_score = 7
-        except Exception as e:
-            logger.error(f"Error parsing Gemini review: {e}")
-            original_card.quality_score = 7
+    _AXIS_KEYS = ('consistency', 'correctness', 'shareability', 'atomicity')
+    _CODE_FENCE = re.compile(r'```(?:json)?\s*(.*?)```', re.DOTALL)
 
-        return original_card
+    @classmethod
+    def _parse_review(cls, text: str) -> Optional[CardReview]:
+        """Parse the reviewer's JSON verdict; None if it cannot be trusted.
 
-    def batch_review(self, cards: List[ZettelkastenCard]) -> List[ZettelkastenCard]:
+        Tolerates thinking prefixes and ```json fences, but *not* missing or
+        out-of-range scores — a half-parsed verdict must not be mistaken for a
+        real judgement, because the gate treats "unparseable" as "not approved".
         """
-        Review multiple cards.
+        if not text:
+            return None
+        cleaned = ZettelkastenLLMEnhancer._strip_thinking(text)
+        fence = cls._CODE_FENCE.search(cleaned)
+        if fence:
+            cleaned = fence.group(1)
 
-        For efficiency, this processes cards one at a time but could be
-        optimized for batch API calls if needed.
-        """
-        if not self.is_available():
-            logger.warning("Gemini API not configured, skipping batch review")
-            for card in cards:
-                card.quality_score = 7
-            return cards
+        data = cls._loads_json(cleaned)
+        if not isinstance(data, dict):
+            return None
 
-        reviewed_cards = []
-        for i, card in enumerate(cards):
-            logger.info(f"Reviewing card {i+1}/{len(cards)}...")
-            reviewed_card = self.review_and_refine(card)
-            reviewed_cards.append(reviewed_card)
+        scores: Dict[str, int] = {}
+        for key in cls._AXIS_KEYS:
+            value = data.get(key)
+            if isinstance(value, bool):
+                return None
+            if isinstance(value, str) and value.strip().isdigit():
+                value = int(value.strip())
+            if not isinstance(value, (int, float)):
+                return None
+            value = int(value)
+            if not 1 <= value <= 5:
+                return None
+            scores[key] = value
 
-        return reviewed_cards
+        notes = data.get('notes') or ''
+        return CardReview(notes=str(notes).strip(), **scores)
+
+    @staticmethod
+    def _loads_json(text: str) -> Optional[Dict]:
+        """Innermost brace pair first, then outermost — small models like to
+        wrap the verdict in prose or nest an example object."""
+        candidates: List[str] = []
+        match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
+        if match:
+            candidates.append(match.group())
+        start, end = text.find('{'), text.rfind('}')
+        if start != -1 and end > start:
+            candidates.append(text[start:end + 1])
+        for candidate in candidates:
+            try:
+                parsed = json.loads(candidate)
+            except (ValueError, TypeError):
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+        return None
+
+
+@dataclass
+class GenerationResult:
+    """Cards that cleared the review gate, and the ones that did not.
+
+    Only `passed` is ever uploaded; `rejected` is kept so the local JSON records
+    what was thrown away and why.
+    """
+    passed: List[ZettelkastenCard] = field(default_factory=list)
+    rejected: List[ZettelkastenCard] = field(default_factory=list)
 
 
 class ZettelkastenCardGenerator:
@@ -995,89 +1179,209 @@ class ZettelkastenCardGenerator:
     Flow:
     1. Check if highlights meet minimum threshold
     2. Select best highlights using CardSelectionAlgorithm
-    3. Generate draft cards using ZettelkastenLLMEnhancer (Ollama)
-    4. Review and refine cards using GeminiReviewer
+    3. Generate draft cards using ZettelkastenLLMEnhancer (OLLAMA_MODEL)
+    4. Review gate using CardReviewer (OLLAMA_REVIEW_MODEL) — a rejected card
+       gets one regeneration attempt carrying the reviewer's notes, then it is
+       dropped. Only survivors are returned for upload.
+    5. Classify the survivors into the fixed Tags categories
     """
 
     def __init__(self,
                  max_cards: int = None,
                  min_highlights: int = None,
-                 enable_gemini_review: bool = True,
-                 tag_categories: Optional[List[str]] = None):
+                 tag_categories: Optional[List[str]] = None,
+                 enhancer: Optional[ZettelkastenLLMEnhancer] = None,
+                 reviewer: Optional[CardReviewer] = None):
 
         self.max_cards = max_cards or int(os.getenv('ZETTELKASTEN_MAX_CARDS', '16'))
         self.min_highlights = min_highlights or int(os.getenv('ZETTELKASTEN_MIN_HIGHLIGHTS', '10'))
-        self.enable_gemini_review = enable_gemini_review
         # Fixed Tags classification list (DI from settings); empty → classification off.
         self.tag_categories = list(tag_categories or [])
+        self.max_regen = int(os.getenv('ZETTELKASTEN_REVIEW_MAX_REGEN', '1'))
 
         self.selector = CardSelectionAlgorithm(
             max_cards=self.max_cards,
             min_highlights=self.min_highlights
         )
-        self.enhancer = ZettelkastenLLMEnhancer()
-        self.reviewer = GeminiReviewer()
+        # Injectable so the gate can be exercised without a live Ollama.
+        self.enhancer = enhancer or ZettelkastenLLMEnhancer()
+        self.reviewer = reviewer or CardReviewer(generator_model=self.enhancer.model)
 
     def generate_cards(self, highlights: List[Dict], book_title: str = "") -> List[ZettelkastenCard]:
+        """Cards that passed review. Thin wrapper kept for the legacy entry point."""
+        return self.generate_cards_with_review(highlights, book_title).passed
+
+    def generate_cards_with_review(
+        self, highlights: List[Dict], book_title: str = "",
+    ) -> GenerationResult:
         """
-        Generate Zettelkasten cards from book highlights.
+        Generate Zettelkasten cards from book highlights, gated on review.
 
-        Args:
-            highlights: List of highlight dictionaries from DBReader
-            book_title: Title of the book (for context)
-
-        Returns:
-            List of ZettelkastenCard objects
+        Returns a GenerationResult; `passed` is what may go to Notion. All state
+        travels through arguments and return values because books are synced
+        concurrently through a shared generator instance.
         """
         logger.info(f"Starting Zettelkasten card generation for '{book_title}'")
-        logger.info(f"Total highlights: {len(highlights)}, Max cards: {self.max_cards}, Min threshold: {self.min_highlights}")
+        logger.info(
+            f"Total highlights: {len(highlights)}, Max cards: {self.max_cards}, "
+            f"Min threshold: {self.min_highlights}"
+        )
 
         # Step 1: Check threshold
         if not self.selector.should_generate_cards(highlights):
-            logger.info(f"Skipping card generation: only {len(highlights)} highlights (minimum: {self.min_highlights})")
-            return []
+            logger.info(
+                f"Skipping card generation: only {len(highlights)} highlights "
+                f"(minimum: {self.min_highlights})"
+            )
+            return GenerationResult()
 
         # Step 2: Select best highlights
         selected_highlights = self.selector.select_highlights(highlights)
         if not selected_highlights:
             logger.info("No highlights selected after filtering")
-            return []
+            return GenerationResult()
 
         logger.info(f"Selected {len(selected_highlights)} highlights for card generation")
 
-        # Step 3: Generate draft cards with Ollama
-        logger.info("Generating draft cards with Ollama (Gemma)...")
+        # Step 3: the gate must be usable before we spend minutes drafting.
+        if not self.reviewer.is_available():
+            logger.error(
+                f"審核模型不可用 → '{book_title}' 不產卡也不上傳"
+                "（卡片必須通過審核才能進 Notion）"
+            )
+            return GenerationResult()
+
+        # Step 4: Generate draft cards with the drafting model
+        logger.info("Generating draft cards with Ollama...")
         draft_cards = self.enhancer.batch_generate(selected_highlights, book_title)
 
         if not draft_cards:
             logger.warning("No cards generated from Ollama")
-            return []
+            return GenerationResult()
 
         logger.info(f"Generated {len(draft_cards)} draft cards")
 
-        # Step 4: Review and refine with Gemini (optional)
-        if self.enable_gemini_review and self.reviewer.is_available():
-            logger.info("Reviewing cards with Gemini API...")
-            final_cards = self.reviewer.batch_review(draft_cards)
-        else:
-            logger.info("Skipping Gemini review (disabled or not configured)")
-            final_cards = draft_cards
-            for card in final_cards:
-                card.quality_score = 7  # Default score
+        # Step 5: Review gate (book theme first, then card by card)
+        book_theme = self.reviewer.summarize_book(draft_cards, book_title)
+        result = self._run_review_gate(
+            draft_cards, selected_highlights, book_title, book_theme
+        )
 
-        logger.info(f"Card generation complete: {len(final_cards)} cards")
-
-        # Step 5: Classify into fixed Tags categories (one Ollama call per book)
-        if final_cards and self.tag_categories:
+        # Step 6: Classify survivors into fixed Tags categories (one call per book)
+        if result.passed and self.tag_categories:
             logger.info("Classifying cards into fixed Tags categories...")
-            self.enhancer.classify_cards(final_cards, self.tag_categories, book_title)
+            self.enhancer.classify_cards(result.passed, self.tag_categories, book_title)
 
-        # Log quality statistics
-        if final_cards:
-            avg_score = sum(c.quality_score for c in final_cards) / len(final_cards)
-            logger.info(f"Average quality score: {avg_score:.1f}/10")
+        logger.info(
+            f"'{book_title}' 審核結果：通過 {len(result.passed)} 張／"
+            f"退回 {len(result.rejected)} 張（草稿共 {len(draft_cards)} 張）"
+        )
+        return result
 
-        return final_cards
+    # ----- review gate internals -----
+
+    def _run_review_gate(
+        self,
+        draft_cards: List[ZettelkastenCard],
+        selected_highlights: List[Dict],
+        book_title: str,
+        book_theme: str,
+    ) -> GenerationResult:
+        by_id, by_text = self._index_highlights(selected_highlights)
+        draft_titles = [c.title for c in draft_cards]
+        result = GenerationResult()
+
+        for i, card in enumerate(draft_cards):
+            logger.info(f"審核卡片 {i + 1}/{len(draft_cards)}：{card.title}")
+            siblings = [t for j, t in enumerate(draft_titles) if j != i]
+            current = card
+
+            for attempt in range(self.max_regen + 1):
+                review = self.reviewer.review(
+                    current,
+                    book_title=book_title,
+                    book_theme=book_theme,
+                    sibling_titles=siblings,
+                )
+                if review is not None:
+                    self._apply_review(current, review)
+                    if review.passed(self.reviewer.threshold):
+                        current.review_status = 'passed'
+                        result.passed.append(current)
+                        logger.info(f"  ✅ 通過（{review.summary()}）")
+                        break
+                    logger.info(
+                        f"  ⚠️ 未通過（{review.summary()}）：{review.notes[:120]}"
+                    )
+                else:
+                    current.review_notes = current.review_notes or "審核回應無法解析"
+                    logger.warning("  ⚠️ 審核回應無法解析，視同未通過")
+
+                if attempt >= self.max_regen:
+                    self._reject(result, current, "重產後仍未通過")
+                    break
+
+                highlight = self._find_highlight(current, by_id, by_text)
+                if highlight is None:
+                    self._reject(result, current, "找不到對應的原始劃線，無法重產")
+                    break
+
+                logger.info("  🔄 帶審核意見重產一次")
+                remade = self.enhancer.generate_card(
+                    highlight,
+                    book_title,
+                    book_theme=book_theme,
+                    revision_hint=current.review_notes,
+                )
+                if remade is None:
+                    self._reject(result, current, "重產失敗")
+                    break
+                remade.regenerated = True
+                current = remade
+
+        return result
+
+    @staticmethod
+    def _reject(result: GenerationResult, card: ZettelkastenCard, reason: str) -> None:
+        card.review_status = 'rejected'
+        result.rejected.append(card)
+        logger.info(f"  ❌ 丟棄（{reason}）：{card.title}")
+
+    @staticmethod
+    def _apply_review(card: ZettelkastenCard, review: CardReview) -> None:
+        card.review_scores = review.scores()
+        card.review_notes = review.notes
+        card.review_model = review.model
+
+    @staticmethod
+    def _index_highlights(highlights: List[Dict]) -> Tuple[Dict[str, Dict], Dict[str, Dict]]:
+        by_id: Dict[str, Dict] = {}
+        by_text: Dict[str, Dict] = {}
+        for h in highlights:
+            bookmark_id = str(h.get('bookmark_id') or '')
+            if bookmark_id:
+                by_id[bookmark_id] = h
+            text = (h.get('text') or '').strip()
+            if text:
+                by_text[text] = h
+        return by_id, by_text
+
+    @staticmethod
+    def _find_highlight(
+        card: ZettelkastenCard,
+        by_id: Dict[str, Dict],
+        by_text: Dict[str, Dict],
+    ) -> Optional[Dict]:
+        """Map a card back to the highlight it came from.
+
+        `batch_generate` drops cards it failed to parse, so positional alignment
+        with the selected highlights is unreliable — go through the bookmark id,
+        falling back to the highlight text.
+        """
+        if card.source_bookmark_id and card.source_bookmark_id in by_id:
+            return by_id[card.source_bookmark_id]
+        return by_text.get((card.source_highlight or '').strip())
+
 
 
 def check_ollama_availability() -> bool:
@@ -1090,11 +1394,6 @@ def check_ollama_availability() -> bool:
         return False
 
 
-def check_gemini_availability() -> bool:
-    """Check if Gemini API key is configured"""
-    return bool(os.getenv('GEMINI_API_KEY'))
-
-
 # For testing
 if __name__ == "__main__":
     # Setup basic logging for testing
@@ -1102,7 +1401,7 @@ if __name__ == "__main__":
 
     print("Checking service availability...")
     print(f"Ollama available: {check_ollama_availability()}")
-    print(f"Gemini configured: {check_gemini_availability()}")
+    print(f"Review model ready: {CardReviewer().is_available()}")
 
     # Test with sample data
     sample_highlights = [
@@ -1121,10 +1420,12 @@ if __name__ == "__main__":
     ] * 6  # Duplicate to meet minimum threshold
 
     generator = ZettelkastenCardGenerator(max_cards=3, min_highlights=5)
-    cards = generator.generate_cards(sample_highlights, "測試書籍")
+    result = generator.generate_cards_with_review(sample_highlights, "測試書籍")
 
-    print(f"\nGenerated {len(cards)} cards:")
-    for card in cards:
+    print(f"\nPassed {len(result.passed)} / rejected {len(result.rejected)}:")
+    for card in result.passed:
         print(f"\n--- {card.title} ---")
         print(f"Content: {card.content}")
-        print(f"Quality: {card.quality_score}/10")
+        print(f"Review ({card.review_model}): {card.review_scores}")
+    for card in result.rejected:
+        print(f"\n[REJECTED] {card.title} — {card.review_notes[:100]}")

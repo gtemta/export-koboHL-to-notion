@@ -1,4 +1,6 @@
 """Tests for local JSON persistence + resume — improvement #5."""
+import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -7,15 +9,18 @@ from src.application.use_cases.generate_book_cards_use_case import (
     GenerateBookCardsUseCase,
 )
 from src.infrastructure.persistence.card_store import CardStore
-from zettelkasten_generator import ZettelkastenCard
+from zettelkasten_generator import GenerationResult, ZettelkastenCard
 
 
 def _card(title="卡片", bookmark_id="BM-1"):
     return ZettelkastenCard(
         id="id-1", title=title, content="內容", source_highlight="劃線",
         chapter_reference="第一章", chapter_progress=0.5,
-        quality_score=8, revision_notes="說明", source_bookmark_id=bookmark_id,
-        tags=["習慣", "複利"],
+        source_bookmark_id=bookmark_id, tags=["習慣", "複利"],
+        review_status="passed",
+        review_scores={"consistency": 4, "correctness": 5,
+                       "shareability": 4, "atomicity": 4},
+        review_notes="說明", review_model="qwen3:8b", regenerated=True,
     )
 
 
@@ -24,9 +29,24 @@ class TestCardRoundTrip(unittest.TestCase):
         card = _card()
         rebuilt = ZettelkastenCard.from_dict(card.to_dict())
         for attr in ("title", "content", "source_highlight", "chapter_reference",
-                     "chapter_progress", "quality_score", "revision_notes",
-                     "source_bookmark_id", "tags"):
+                     "chapter_progress", "source_bookmark_id", "tags",
+                     "review_status", "review_scores", "review_notes",
+                     "review_model", "regenerated"):
             self.assertEqual(getattr(rebuilt, attr), getattr(card, attr), attr)
+
+    def test_from_dict_tolerates_json_without_review_fields(self):
+        # cards_output/*.json written before the review gate existed
+        legacy = {
+            "id": "old", "title": "舊卡", "content": "內容",
+            "source_highlight": "劃線", "chapter_reference": "第一章",
+            "chapter_progress": 0.3, "source_bookmark_id": "BM-9",
+            "tags": ["習慣"], "quality_score": 7, "revision_notes": "",
+        }
+        rebuilt = ZettelkastenCard.from_dict(legacy)
+        self.assertEqual(rebuilt.title, "舊卡")
+        self.assertEqual(rebuilt.review_status, "pending")
+        self.assertEqual(rebuilt.review_scores, {})
+        self.assertFalse(rebuilt.regenerated)
 
 
 class TestCardStore(unittest.TestCase):
@@ -58,6 +78,22 @@ class TestCardStore(unittest.TestCase):
     def test_save_empty_returns_none(self):
         self.assertIsNone(self.store.save("我的書", []))
 
+    def test_rejected_recorded_but_never_resumed(self):
+        rejected = _card(title="被退回的卡", bookmark_id="BM-2")
+        path = self.store.save("我的書", [_card()], [rejected])
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual([c["title"] for c in data["rejected"]], ["被退回的卡"])
+        # load_pending only ever hands back `cards`
+        _, cards = self.store.load_pending("我的書")
+        self.assertEqual([c.title for c in cards], ["卡片"])
+
+    def test_all_rejected_saves_record_but_stays_out_of_pending(self):
+        path = self.store.save("我的書", [], [_card(title="被退回的卡")])
+        self.assertTrue(os.path.exists(path))
+        # nothing passed → nothing to upload → nothing to resume
+        self.assertIsNone(self.store.load_pending("我的書"))
+
     def test_slug_sanitizes_illegal_chars(self):
         path = self.store.save('書:名/含*非法?字元', [_card()])
         self.assertIsNotNone(path)
@@ -70,9 +106,9 @@ class _FakeGenerator:
         self.cards = cards
         self.calls = 0
 
-    def generate_cards(self, highlight_dicts, book_title):
+    def generate_cards_with_review(self, highlight_dicts, book_title):
         self.calls += 1
-        return self.cards
+        return GenerationResult(passed=list(self.cards), rejected=[])
 
 
 class _FakeRepo:
