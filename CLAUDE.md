@@ -104,7 +104,7 @@ to the generator, persists the batch via `CardStore`, then uploads through
   把「原文劃線＋卡片＋全書主軸＋同書其他卡標題」一起送審。全書脈絡是為了讓
   `一致性` 能判斷離題與重複，不只是卡內矛盾。
 - **四面向各 1–5 分**（`consistency`/`correctness`/`shareability`/`atomicity`），
-  **全部 ≥ `ZETTELKASTEN_REVIEW_MIN_SCORE`（預設 3）才通過**——不用平均，否則
+  **全部 ≥ `ZETTELKASTEN_REVIEW_MIN_SCORE`（預設 4）才通過**——不用平均，否則
   「寫得漂亮但塞了三個概念」會被高分項救回來。
 - **沒過**：帶審核意見（`revision_hint`）重產一次，再不過就丟棄，不上傳。
 - **審核不可用**（Ollama 沒開／模型沒 pull／回應解析不出 JSON）→ 該本書
@@ -120,6 +120,15 @@ to the generator, persists the batch via `CardStore`, then uploads through
   ＋ 400 退回重試、in-stream error、`done_reason=length` 空輸出警告、timeout 撿殘句）。
 - **DRY_RUN 驗不到這個功能**（`container.py` 在 dry-run 一律跳過卡片流程），
   必須真跑。
+- **並行與模型換入換出**：書籍走 `ThreadPoolExecutor`，A 書產卡時 B 書可能正在
+  審核，兩個模型會在 Ollama 互相擠掉（實測 VRAM 只放得下一個）。真跑很慢時先看
+  log 時間戳，再考慮設 `OLLAMA_MAX_LOADED_MODELS=2` 或調低 `MAX_WORKERS`。
+
+**標籤分隔（Phase 2 T1，2026-07-28）**：模型幾乎不照 prompt 用頓號，實測會用
+全形冒號／破折號／中點／句號／連字號把標籤串成一整條。`_TAG_SPLIT` 因此涵蓋
+全部這些分隔符，切完再修邊（去 `#`、括號、引號）、丟棄空值與 >15 字的句子、
+去重。兩處 prompt 也加了負面規則。**T2（`tools/fix_card_tags.py` 重切既有 JSON）
+尚未做**——只修了未來新卡。
 
 ### Entry point flow
 
@@ -186,7 +195,7 @@ Run legacy via `python -m legacy.uploadToNotion` (the module adjusts `sys.path` 
     - `ZETTELKASTEN_CARDS_OUTPUT_DIR`: local card JSON dir (default `cards_output`, gitignored)
     - Review gate: `OLLAMA_REVIEW_MODEL` (default `qwen3:8b`, must differ from
       `OLLAMA_MODEL`), `OLLAMA_REVIEW_TIMEOUT_SECONDS`, `ZETTELKASTEN_REVIEW_MIN_SCORE`
-      (default `3`), `ZETTELKASTEN_REVIEW_MAX_REGEN` (default `1`)
+      (default `4`), `ZETTELKASTEN_REVIEW_MAX_REGEN` (default `1`)
     - Other Ollama vars (`OLLAMA_*`): see `.env.example`
 - **KoboReader.sqlite**: Copy from Kobo device to project root (or set `KOBO_DB_PATH`)
 - **Notion database** must have: Title (text), Exported (checkbox). Optional fields: Author, Publisher, Subtitle, Description, ISBN, SpendReadingTime, LastReadDate, LastFinishedReadTime, PercentageRead.

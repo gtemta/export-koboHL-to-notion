@@ -1,7 +1,7 @@
 """Tests for card tagging: free concept tags → Key Word, fixed categories → Tags.
 
-Covers Phase 1 E2/E3 of the knowledge-refinement plan. The 【標籤】 extraction
-tests still guard the generator's concept-tag parsing (Phase 2 revisits _TAG_SPLIT).
+Covers Phase 1 E2/E3 plus Phase 2 T1 (the 【標籤】 separators the model actually
+uses instead of the 頓號 the prompt asks for).
 """
 import unittest
 
@@ -33,6 +33,64 @@ class TestExtractTags(unittest.TestCase):
         enhancer = ZettelkastenLLMEnhancer()
         self.assertIn("【標籤】", enhancer._build_prompt("文字", "書名"))
         self.assertIn("【標籤】", enhancer._build_batch_prompt([{"text": "a"}], "書名"))
+
+    def test_prompt_forbids_gluing_separators(self):
+        enhancer = ZettelkastenLLMEnhancer()
+        for prompt in (enhancer._build_prompt("文字", "書名"),
+                       enhancer._build_batch_prompt([{"text": "a"}], "書名")):
+            self.assertIn("只能用頓號", prompt)
+
+
+class TestGluedTagSeparators(unittest.TestCase):
+    """T1: real failures observed in cards_output/*.json and live runs.
+
+    Each of these used to survive _TAG_SPLIT intact and land in Notion's
+    Key Word column as one unusable mega-tag.
+    """
+
+    def _tags(self, tag_line):
+        return ZettelkastenLLMEnhancer._extract_tags(f"【標籤】{tag_line}")
+
+    def test_fullwidth_colon(self):
+        # 《多巴胺國度》全書 16 張都長這樣
+        self.assertEqual(self._tags("語言演化：社交結構：謊言藝術"),
+                         ["語言演化", "社交結構", "謊言藝術"])
+
+    def test_em_dash(self):
+        # 《大威脅》
+        self.assertEqual(self._tags("資本結構—負債比率—金融風險"),
+                         ["資本結構", "負債比率", "金融風險"])
+
+    def test_leading_middle_dot(self):
+        # 《說理Ⅱ》— note the leading ・
+        self.assertEqual(self._tags("・說服論述・故事架構・聽眾心理"),
+                         ["說服論述", "故事架構", "聽眾心理"])
+
+    def test_full_stop(self):
+        self.assertEqual(self._tags("環境心理學。習慣建立。行動科學"),
+                         ["環境心理學", "習慣建立", "行動科學"])
+
+    def test_ascii_hyphen(self):
+        self.assertEqual(self._tags("習慣-複利-一致性"), ["習慣", "複利", "一致性"])
+
+    def test_mixed_separators(self):
+        self.assertEqual(self._tags("學習方法, 內在動力・知識轉化"),
+                         ["學習方法", "內在動力", "知識轉化"])
+
+    def test_hash_and_brackets_stripped(self):
+        self.assertEqual(self._tags("#習慣、「複利」、（系統）"),
+                         ["習慣", "複利", "系統"])
+
+    def test_sentence_length_tag_dropped(self):
+        # not a concept — the model wrote prose on the 標籤 line
+        self.assertEqual(
+            self._tags("這是一句完全沒有分隔符號而且長到不可能是概念標籤的句子"), [])
+
+    def test_duplicates_deduped(self):
+        self.assertEqual(self._tags("習慣、習慣、複利"), ["習慣", "複利"])
+
+    def test_punctuation_only_yields_nothing(self):
+        self.assertEqual(self._tags("、、—・"), [])
 
 
 def _card(tags=None, categories=None):

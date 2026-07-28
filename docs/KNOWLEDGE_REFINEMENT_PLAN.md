@@ -11,7 +11,10 @@
 ## 總進度
 
 - ✅ Phase 1：卡片盒 schema 對齊（E1–E5）— 完成 2026-07-09；單元＋fake-client 煙霧驗證通過，待真實 Notion 端對端
-- ⬜ Phase 2：標籤修復（T1 解析 / T2 既有 JSON 重切）
+- 🟡 Phase 2：標籤修復 — **T1 完成 2026-07-28**（`_TAG_SPLIT` 涵蓋全形冒號／
+  破折號／中點／句號／連字號，切完修邊、丟棄 >15 字的句子、去重；兩處 prompt 加
+  負面規則；`tests/unit/test_card_tags.py` 以實測壞格式當案例）。
+  **T2（`tools/fix_card_tags.py` 重切既有 JSON）未做** — 只修了未來新卡。
 - ✅ Phase 3：審核層地端化 — 完成 2026-07-28，但**以審核閘門取代原規格**，
   見 `docs/superpowers/specs/2026-07-28-card-review-gate-design.md`。
   R1（`_ollama_generate` 抽取）、R2（移除 7 處假分數）照做；

@@ -111,7 +111,9 @@
 
 > Branch：`feat/card-quality`。
 > 規格沿用 `KNOWLEDGE_REFINEMENT_PLAN.md` Phase 2（T1/T2 標籤重切）與 Phase 4
-> （K1 主張式標題／K2 延伸段／K3 註記上卡／K4 章節消毒），已核准。新增：
+> （K1 主張式標題／K2 延伸段／K3 註記上卡／K4 章節消毒），已核准。
+> **T1 已於 2026-07-28 隨審核閘門一併完成**（見 `2026-07-28-card-review-gate-design.md`）；
+> T2 與 Phase 4 仍待做。新增：
 
 ### 3-1 低分舊卡重產（本次新定案）
 

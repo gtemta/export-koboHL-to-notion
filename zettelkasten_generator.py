@@ -450,6 +450,8 @@ class ZettelkastenLLMEnhancer:
 4. 使用繁體中文，符合台灣用語習慣
 5. 確保內容是獨立完整的，不需要回頭看原文也能理解
 6. 標籤要用抽象的概念詞，不要用書名或章節名
+7. 標籤之間只能用頓號（、）分隔，每個標籤 2-6 個字。絕對不要用冒號、破折號、
+   中點或句號把標籤串在一起（❌「語言演化：社交結構」❌「習慣-複利」✅「習慣、複利」）
 
 請直接輸出，不要加任何解釋："""
 
@@ -535,22 +537,36 @@ class ZettelkastenLLMEnhancer:
         return title, content
 
     _TAG_LINE = re.compile(r'【標籤】\s*(.+?)(?=【|###|\n\n|$)', re.DOTALL)
-    _TAG_SPLIT = re.compile(r'[、,，/|｜\s]+')
+    # Separators the model actually uses instead of the 頓號 we ask for. Observed
+    # in real output: "語言演化：社交結構：謊言藝術"（全形冒號）、
+    # "資本結構—負債比率—金融風險"（破折號）、"・說服論述・故事架構"（中點）、
+    # "環境心理學。習慣建立。行動科學"（句號）、"習慣-複利-一致性"（連字號）。
+    _TAG_SPLIT = re.compile(r'[、,，/|｜:：;；。．.・·\-‑–—―−~～\s]+')
+    # Punctuation to shave off a tag's edges once it has been split out.
+    _TAG_TRIM = '#*「」『』〈〉()（）[]【】"\'`'
+    # A "tag" longer than this is a sentence the model failed to split, not a concept.
+    _TAG_MAX_LEN = 15
 
     @classmethod
     def _extract_tags(cls, text: str, limit: int = 3) -> List[str]:
-        """Pull 2-3 concept tags from a 【標籤】 line; [] if absent."""
+        """Pull 2-3 concept tags from a 【標籤】 line; [] if absent.
+
+        Models routinely ignore "separate with 、" and glue the tags together
+        with colons, dashes, middle dots or full stops. Splitting on all of them
+        is the difference between three browsable concepts and one unusable
+        mega-tag in the Key Word column.
+        """
         if not text:
             return []
         match = cls._TAG_LINE.search(text)
         if not match:
             return []
-        raw = match.group(1).strip()
         tags: List[str] = []
-        for part in cls._TAG_SPLIT.split(raw):
-            tag = part.strip().lstrip('#').replace('，', '').replace(',', '')
-            if tag and tag not in tags:
-                tags.append(tag)
+        for part in cls._TAG_SPLIT.split(match.group(1).strip()):
+            tag = part.strip().strip(cls._TAG_TRIM).strip()
+            if not tag or len(tag) > cls._TAG_MAX_LEN or tag in tags:
+                continue
+            tags.append(tag)
             if len(tags) >= limit:
                 break
         return tags
@@ -710,6 +726,8 @@ class ZettelkastenLLMEnhancer:
 3. {n} 張卡都要給，不可省略、不可合併
 4. 分隔符只用 ### CARD_編號，不要加其他註解、結語或總結
 5. 標題 5-15 個字，內容 100-150 個字
+6. 【標籤】之間只能用頓號（、）分隔，每個標籤 2-6 個字。絕對不要用冒號、破折號、
+   中點或句號把標籤串在一起（❌「語言演化：社交結構」❌「習慣-複利」✅「習慣、複利」）
 
 請直接輸出，不要在格式外加任何解釋："""
 
@@ -902,7 +920,7 @@ class CardReviewer:
         self.model = model or os.getenv('OLLAMA_REVIEW_MODEL', self._DEFAULT_REVIEW_MODEL)
         self.threshold = (
             threshold if threshold is not None
-            else int(os.getenv('ZETTELKASTEN_REVIEW_MIN_SCORE', '3'))
+            else int(os.getenv('ZETTELKASTEN_REVIEW_MIN_SCORE', '4'))
         )
         self.timeout_s = int(os.getenv('OLLAMA_REVIEW_TIMEOUT_SECONDS', '300'))
         logger.info(
