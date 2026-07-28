@@ -80,7 +80,14 @@
 
 ---
 
-## 第 2 批：審核真實化
+## 第 2 批：審核真實化 — ✅ 已完成（2026-07-28），但**規格已被取代**
+
+> 實際做法見 `2026-07-28-card-review-gate-design.md`（分支 `feat/card-review-gate`）。
+> 差異：改為**地端交叉審核閘門**——產卡與審核用不同的 Ollama 模型，四面向各 1–5 分
+> 全部達標才通過，**沒通過的卡不上傳 Notion**（原規格只記分數不擋）。
+> R1 的 `_ollama_generate` 抽取、R2 的移除假分數照做；**R3 重審 CLI 與 Gemini
+> 可選後端取消**——Notion 不再顯示分數，重審舊卡沒有地方可寫。
+> 以下為原規格，僅存查：
 
 > Branch：`feat/real-review`。
 > 規格沿用 `KNOWLEDGE_REFINEMENT_PLAN.md` Phase 3（R1/R2/R3），已核准，此處只記差異與提醒：

@@ -31,7 +31,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### 1. 硬基礎（一次性建設，已完成 2026-07-07）
 
 - [x] `pyproject.toml` 集中工具設定：`ruff`（lint）＋ `pytest`。（`src/domain/` 型別檢查可日後漸進加上。）
-- [x] 依賴鎖定：`requirements.txt`（執行）＋ `requirements-dev.txt`（pytest、ruff）。Ollama/Gemini 皆用 `requests` 直打 REST，無額外 SDK 依賴。
+- [x] 依賴鎖定：`requirements.txt`（執行）＋ `requirements-dev.txt`（pytest、ruff）。Ollama 用 `requests` 直打 REST，無額外 SDK 依賴。
 - [x] GitHub Actions 最小 CI：`ruff check` ＋ `pytest tests`（`.github/workflows/ci.yml`）。
 - **不准留「已知是壞的」測試**：壞掉的測試要嘛修、要嘛刪。紅燈常駐會讓人和 AI 都學會忽略紅燈，比沒測試更糟。
 - 秘密與資料檔邊界：`.env`、`KoboReader.sqlite`、`cards_output/`、`logs/` 永不進版控；`.env.example` 是唯一進版控的設定樣板。
@@ -80,7 +80,8 @@ src/
     │   ├── notion_api_repository.py     — implements NotionRepository (API orchestration)
     │   ├── highlight_page_blocks.py     — pure block builders: 劃線頁 v2 兩層 toggle 版面
     │   ├── dry_run_notion_repository.py — DRY_RUN decorator: reads delegate, writes log-only
-    │   ├── zettelkasten_card_repository.py — uploads cards to 卡片盒 DB (per-highlight dedup)
+    │   ├── zettelkasten_card_repository.py — uploads cards to 卡片盒 DB (per-highlight dedup;
+    │   │                                     刻意不寫任何審核痕跡，見「卡片審核閘門」)
     │   ├── rate_limiter.py              — thread-safe ~3 req/s limiter
     │   └── retry_policy.py              — 409/429/404 exponential backoff
     ├── external/cover_fetcher.py        — Google Books + Open Library fallback
@@ -91,6 +92,34 @@ Card generation (`zettelkasten_generator.py`, still at project root) is wired in
 an optional post-sync step: `GenerateBookCardsUseCase` bridges `Highlight` entities
 to the generator, persists the batch via `CardStore`, then uploads through
 `ZettelkastenCardRepository`. Enabled by `ENABLE_ZETTELKASTEN_CARDS=true`.
+
+### 卡片審核閘門（2026-07-28）
+
+產卡與上傳之間有一道**地端交叉審核**：產卡用 `OLLAMA_MODEL`，審核用
+**另一個**模型 `OLLAMA_REVIEW_MODEL`（預設 `qwen3:8b`）——同一個模型改自己的考卷
+只會重新發現自己的盲點。實作全在 `zettelkasten_generator.py`（`CardReview`、
+`CardReviewer`、`GenerationResult`、`generate_cards_with_review`）。
+
+- **兩階段**：先 `summarize_book()` 一次呼叫抽出全書主軸，再逐卡 `review()`，
+  把「原文劃線＋卡片＋全書主軸＋同書其他卡標題」一起送審。全書脈絡是為了讓
+  `一致性` 能判斷離題與重複，不只是卡內矛盾。
+- **四面向各 1–5 分**（`consistency`/`correctness`/`shareability`/`atomicity`），
+  **全部 ≥ `ZETTELKASTEN_REVIEW_MIN_SCORE`（預設 3）才通過**——不用平均，否則
+  「寫得漂亮但塞了三個概念」會被高分項救回來。
+- **沒過**：帶審核意見（`revision_hint`）重產一次，再不過就丟棄，不上傳。
+- **審核不可用**（Ollama 沒開／模型沒 pull／回應解析不出 JSON）→ 該本書
+  **一張卡都不上傳**，log ERROR。`CardReviewer.is_available()` 會檢查模型是否
+  真的 pull 過，才能區分「服務沒開」與「模型沒下載」。
+- **Notion 不留任何審核痕跡**：沒有品質分數欄、沒有狀態欄、沒有審稿 toggle。
+  分數只在 `cards_output/*.json`（`review_scores`/`review_status`/`review_model`/
+  `regenerated`）與 log 裡。被退的卡存進同一份 JSON 的 `rejected` 頂層鍵，
+  `CardStore.load_pending` 只讀 `cards`，所以續傳絕不會誤傳被退的卡。
+- **並行安全**：書籍走 `ThreadPoolExecutor` 且共用同一個 generator 實例，審核狀態
+  一律走參數與回傳值，不放實例屬性。
+- `_ollama_generate()` 是產卡／分類／審核共用的串流 POST helper（`think: false`
+  ＋ 400 退回重試、in-stream error、`done_reason=length` 空輸出警告、timeout 撿殘句）。
+- **DRY_RUN 驗不到這個功能**（`container.py` 在 dry-run 一律跳過卡片流程），
+  必須真跑。
 
 ### Entry point flow
 
@@ -155,17 +184,21 @@ Run legacy via `python -m legacy.uploadToNotion` (the module adjusts `sys.path` 
     - `ZETTELKASTEN_MIN_HIGHLIGHTS` (default `10`), `ZETTELKASTEN_MAX_CARDS` (default `16`)
     - `ZETTELKASTEN_TAG_CATEGORIES`: comma-separated fixed Tags list (default in `settings.DEFAULT_TAG_CATEGORIES`). LLM classifies each card into 1-2 of these; missing options are auto-seeded into the 卡片盒 Tags column on first upload.
     - `ZETTELKASTEN_CARDS_OUTPUT_DIR`: local card JSON dir (default `cards_output`, gitignored)
-    - Ollama + Gemini vars (`OLLAMA_*`, `GEMINI_*`): see `.env.example`
+    - Review gate: `OLLAMA_REVIEW_MODEL` (default `qwen3:8b`, must differ from
+      `OLLAMA_MODEL`), `OLLAMA_REVIEW_TIMEOUT_SECONDS`, `ZETTELKASTEN_REVIEW_MIN_SCORE`
+      (default `3`), `ZETTELKASTEN_REVIEW_MAX_REGEN` (default `1`)
+    - Other Ollama vars (`OLLAMA_*`): see `.env.example`
 - **KoboReader.sqlite**: Copy from Kobo device to project root (or set `KOBO_DB_PATH`)
 - **Notion database** must have: Title (text), Exported (checkbox). Optional fields: Author, Publisher, Subtitle, Description, ISBN, SpendReadingTime, LastReadDate, LastFinishedReadTime, PercentageRead.
 - **Notion 卡片盒 database** (when cards enabled): 標題 (title) is required. The
   repository reads the DB schema first and **auto-creates** the missing optional
-  columns (`來源劃線ID`, `品質分數`, `狀態`) + seeds missing `Tags` options on the
-  first upload (`_ensure_schema`). Columns written when present:
+  column `來源劃線ID` + seeds missing `Tags` options on the first upload
+  (`_ensure_schema`). Columns written when present:
   `來源` (relation → Books DB), `Key Word` (rich_text — free concept tags, 、-joined),
   `Tags` (multi_select — fixed-category classification, only values in the allowed
-  list), `來源劃線ID` (rich_text, enables per-highlight dedup), `品質分數` (number),
-  `狀態` (select: 草稿/已審/永久筆記). The old `主題` column is no longer used.
+  list), `來源劃線ID` (rich_text, enables per-highlight dedup). The old `主題`,
+  `品質分數` and `狀態` columns are no longer written — review results stay local
+  (see 卡片審核閘門). Existing columns in the user's DB are left alone, just unused.
 - **Notion DB 三層關係**: 卡片盒 `來源` relation → 📚 Personal Reading List (Books
   DB, title 欄叫 `Name`)，Reading List 的 `Kobo EReader` relation → Kobo highlights
   DB。書不在 Reading List 時 repository **自動建頁**（Name=完整書名、Kobo EReader

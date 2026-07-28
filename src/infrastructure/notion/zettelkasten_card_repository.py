@@ -7,10 +7,13 @@ property if the DB has it (see _wants):
   - Key Word (rich_text)   — free concept tags, joined by 、
   - Tags (multi_select)    — fixed-category classification
   - 來源劃線ID (rich_text)  — source-highlight id, enables per-highlight dedup
-  - 品質分數 (number)       — reviewer quality score (1-10)
-  - 狀態 (select)           — 草稿 / 已審 / 永久筆記
 Card content / source highlight / chapter reference go into the page body
 as blocks.
+
+Review scores are deliberately NOT written to Notion. The review gate
+(`CardReviewer`) decides whether a card gets here at all; every card in the DB
+has already passed, so a score column would be noise. The scores live in
+`cards_output/*.json` and the run log.
 """
 import hashlib
 import logging
@@ -33,14 +36,6 @@ _SOURCE_ID_PROPERTY = "來源劃線ID"
 # rich_text holding free concept tags (、-joined); multi_select for fixed categories.
 _KEYWORD_PROPERTY = "Key Word"
 _TAGS_PROPERTY = "Tags"
-# number property: reviewer quality score (1-10); select: card processing stage.
-_QUALITY_PROPERTY = "品質分數"
-_STATUS_PROPERTY = "狀態"
-_STATUS_DRAFT = "草稿"
-_STATUS_REVIEWED = "已審"
-_STATUS_PERMANENT = "永久筆記"  # human-only decision, never set automatically
-# score at/above which a card counts as reviewed rather than a rough draft.
-_REVIEWED_SCORE = 7
 # Books DB title property + the relation on it that points back at the Kobo DB.
 _BOOKS_TITLE_PROPERTY = "Name"
 _KOBO_RELATION_PROPERTY = "Kobo EReader"
@@ -188,14 +183,6 @@ class ZettelkastenCardRepository:
         to_add: dict = {}
         if _SOURCE_ID_PROPERTY not in existing:
             to_add[_SOURCE_ID_PROPERTY] = {"rich_text": {}}
-        if _QUALITY_PROPERTY not in existing:
-            to_add[_QUALITY_PROPERTY] = {"number": {}}
-        if _STATUS_PROPERTY not in existing:
-            to_add[_STATUS_PROPERTY] = {"select": {"options": [
-                {"name": _STATUS_DRAFT},
-                {"name": _STATUS_REVIEWED},
-                {"name": _STATUS_PERMANENT},
-            ]}}
 
         tags_update = self._tags_options_update(existing.get(_TAGS_PROPERTY))
         if tags_update is not None:
@@ -605,23 +592,9 @@ class ZettelkastenCardRepository:
             props[_TAGS_PROPERTY] = {
                 "multi_select": [{"name": c} for c in categories]
             }
-        score = getattr(card, "quality_score", 0) or 0
-        if score > 0 and self._wants(_QUALITY_PROPERTY):
-            props[_QUALITY_PROPERTY] = {"number": score}
-        if self._wants(_STATUS_PROPERTY):
-            props[_STATUS_PROPERTY] = {"select": {"name": self._status_name(card)}}
         if books_page_id and self._wants("來源"):
             props["來源"] = {"relation": [{"id": books_page_id}]}
         return props
-
-    @staticmethod
-    def _status_name(card: ZettelkastenCard) -> str:
-        """草稿 for a rough draft, 已審 once its score clears the reviewed bar.
-
-        永久筆記 is a human decision and is never set automatically.
-        """
-        score = getattr(card, "quality_score", 0) or 0
-        return _STATUS_REVIEWED if score >= _REVIEWED_SCORE else _STATUS_DRAFT
 
     def _wants(self, prop_name: str) -> bool:
         """Whether to write a property: yes if the DB has it, or if the schema
@@ -698,23 +671,7 @@ class ZettelkastenCardRepository:
                 },
             })
 
-        notes = (getattr(card, "revision_notes", "") or "").strip()
-        if notes:
-            blocks.append(self._revision_toggle(notes))
-
         return blocks
-
-    @staticmethod
-    def _revision_toggle(notes: str) -> dict:
-        """Collapsible block holding Gemini's revision notes, for later review."""
-        return {
-            "object": "block",
-            "type": "toggle",
-            "toggle": {
-                "rich_text": [{"type": "text", "text": {"content": "🔍 AI 審稿修改說明"}}],
-                "children": [_paragraph(notes[:_RICH_TEXT_LIMIT])],
-            },
-        }
 
 
 def _paragraph(text: str) -> dict:

@@ -32,7 +32,6 @@ try:
         ZettelkastenCardGenerator,
         ZettelkastenCard,
         check_ollama_availability,
-        check_gemini_availability
     )
     ZETTELKASTEN_AVAILABLE = True
 except ImportError as e:
