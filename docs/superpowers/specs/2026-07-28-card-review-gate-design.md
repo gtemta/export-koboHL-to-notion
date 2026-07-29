@@ -93,7 +93,12 @@ e2e 實跑再次確認 `_TAG_SPLIT` 的老問題：模型幾乎不照 prompt 用
 修法：分隔符集合擴充到全形/半形冒號、分號、句號、各種破折號與連字號、中點、
 波浪號；切完修邊（去 `#`、括號、引號）、丟棄空值與超過 15 字的句子（那是模型
 在標籤行寫散文）、去重；兩處 prompt 加負面規則與正反例。
-**T2（重切既有 `cards_output/*.json` 的 CLI）未做**，只修未來新卡。
+T2：`tools/fix_card_tags.py` 重切既有 `cards_output/*.json`。切分規則抽成
+`ZettelkastenLLMEnhancer._split_tags()` 由 T1/T2 共用——兩份分隔符清單第一次修改
+就會漂移。工具只動 `tags`，其餘欄位（含 `uploaded`/`uploaded_at`/舊的
+`quality_score`）一字不動；原子寫檔（temp + `os.replace`）、重跑冪等；
+`--dry-run` 印「原標籤 → 新標籤」，標籤被清空的卡另外標記提醒人工確認。
+**只改本地 JSON**——已上傳 Notion 的卡片 `Key Word` 欄仍是舊值，要等 Phase 5 backfill。
 
 ## 注意事項
 
