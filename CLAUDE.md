@@ -18,6 +18,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   cards_output JSON, auto-creates Reading List pages, re-runs Tags classification).
   Supports `DRY_RUN=true`.
 
+### Maintenance tools (`tools/`)
+- **Re-split glued tags**: `python tools/fix_card_tags.py --dry-run`（預覽「原標籤 →
+  新標籤」）／不帶 `--dry-run` 正式寫回。掃 `cards_output/*.json`（`--dir` 可換），
+  用 `_split_tags` 重切每張卡的 `tags`，其餘欄位一字不動；原子寫檔、重跑冪等。
+  只改本地 JSON——Notion 上既有卡片的 `Key Word` 要靠 backfill 才會更新。
+
 ### Quality gates
 - **Lint**: `python -m ruff check .` (config in `pyproject.toml`; `legacy/` + `analysis/` excluded)
 - **Tests**: `python -m pytest` (all green, no external resources needed)
@@ -124,11 +130,13 @@ to the generator, persists the batch via `CardStore`, then uploads through
   審核，兩個模型會在 Ollama 互相擠掉（實測 VRAM 只放得下一個）。真跑很慢時先看
   log 時間戳，再考慮設 `OLLAMA_MAX_LOADED_MODELS=2` 或調低 `MAX_WORKERS`。
 
-**標籤分隔（Phase 2 T1，2026-07-28）**：模型幾乎不照 prompt 用頓號，實測會用
+**標籤分隔（Phase 2 T1/T2，2026-07-28）**：模型幾乎不照 prompt 用頓號，實測會用
 全形冒號／破折號／中點／句號／連字號把標籤串成一整條。`_TAG_SPLIT` 因此涵蓋
 全部這些分隔符，切完再修邊（去 `#`、括號、引號）、丟棄空值與 >15 字的句子、
-去重。兩處 prompt 也加了負面規則。**T2（`tools/fix_card_tags.py` 重切既有 JSON）
-尚未做**——只修了未來新卡。
+去重。兩處 prompt 也加了負面規則。切分規則抽在
+`ZettelkastenLLMEnhancer._split_tags()`，`_extract_tags` 與 `tools/fix_card_tags.py`
+共用同一份，避免兩邊漂移。既有 JSON 用該工具重切（T2）；**已上傳 Notion 的卡片
+`Key Word` 欄仍是舊值**，要等 backfill 才會更新。
 
 ### Entry point flow
 

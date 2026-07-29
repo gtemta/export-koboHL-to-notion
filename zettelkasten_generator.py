@@ -561,8 +561,18 @@ class ZettelkastenLLMEnhancer:
         match = cls._TAG_LINE.search(text)
         if not match:
             return []
+        return cls._split_tags(match.group(1), limit)
+
+    @classmethod
+    def _split_tags(cls, raw: str, limit: int = 3) -> List[str]:
+        """Split one 標籤 string into clean, de-duplicated concept tags.
+
+        Kept separate from `_extract_tags` so `tools/fix_card_tags.py` can
+        re-split already-stored tags through exactly these rules — two copies
+        of the separator list would drift apart on the first fix.
+        """
         tags: List[str] = []
-        for part in cls._TAG_SPLIT.split(match.group(1).strip()):
+        for part in cls._TAG_SPLIT.split((raw or "").strip()):
             tag = part.strip().strip(cls._TAG_TRIM).strip()
             if not tag or len(tag) > cls._TAG_MAX_LEN or tag in tags:
                 continue
