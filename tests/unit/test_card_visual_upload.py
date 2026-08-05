@@ -1,7 +1,7 @@
 """卡片上傳時的視覺欄位：cover / icon / 加工狀態，以及自動建欄。"""
 import unittest
 
-from src.infrastructure.notion.card_visuals import _COVER_BASE
+from src.infrastructure.notion.card_visuals import _COVER_BASE, _DEFAULT_COVER
 from src.infrastructure.notion.zettelkasten_card_repository import (
     _CREATED_PROPERTY,
     _REVIEWED_PROPERTY,
@@ -13,10 +13,15 @@ from zettelkasten_generator import ZettelkastenCard
 
 
 def _card(icon="🧭", categories=None):
+    # NOTE: `categories=None` (not passed) means "use the default"; an
+    # explicitly-passed `[]` must reach the card as `[]` so tests can exercise
+    # the no-category branch — `categories or [...]` would silently swallow it
+    # since `[]` is falsy in Python.
+    default_categories = ["💞心理學"]
     card = ZettelkastenCard(
         id="id", title="卡片標題", content="內容", source_highlight="劃線",
         chapter_reference="第一章", chapter_progress=0.5,
-        categories=list(categories or ["💞心理學"]),
+        categories=list(categories if categories is not None else default_categories),
     )
     card.icon = icon
     return card
@@ -53,8 +58,14 @@ class TestBuildVisuals(unittest.TestCase):
         self.assertNotIn("icon", visuals)
 
     def test_no_category_still_gets_a_cover(self):
-        visuals = ZettelkastenCardRepository._build_visuals(_card(categories=[]))
-        self.assertTrue(visuals["cover"]["external"]["url"].startswith(_COVER_BASE))
+        card = _card(categories=[])
+        self.assertEqual(card.categories, [])  # guard against _card() swallowing []
+        visuals = ZettelkastenCardRepository._build_visuals(card)
+        # must be the no-category default, not the 心理學 gradient from other tests
+        self.assertEqual(
+            visuals["cover"],
+            {"type": "external", "external": {"url": _COVER_BASE + _DEFAULT_COVER}},
+        )
 
 
 class TestStageProperty(unittest.TestCase):
