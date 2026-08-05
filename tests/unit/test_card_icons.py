@@ -86,5 +86,24 @@ class TestFallbackIcon(unittest.TestCase):
             self.assertIn(icon, _ICON_PALETTE_SET, cat)
 
 
+class TestIconPersistence(unittest.TestCase):
+    def test_default_is_empty(self):
+        self.assertEqual(_card().icon, "")
+
+    def test_roundtrip_preserves_icon(self):
+        card = _card()
+        card.icon = "🧭"
+        self.assertEqual(ZettelkastenCard.from_dict(card.to_dict()).icon, "🧭")
+
+    def test_from_dict_without_icon_is_back_compatible(self):
+        # icon 欄位存在之前產生的 JSON 必須照樣載入
+        card = ZettelkastenCard.from_dict({"id": "x", "title": "t", "content": "c"})
+        self.assertEqual(card.icon, "")
+
+    def test_from_dict_null_icon(self):
+        card = ZettelkastenCard.from_dict({"id": "x", "title": "t", "icon": None})
+        self.assertEqual(card.icon, "")
+
+
 if __name__ == "__main__":
     unittest.main()

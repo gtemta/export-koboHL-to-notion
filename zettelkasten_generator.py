@@ -151,6 +151,7 @@ class ZettelkastenCard:
     source_bookmark_id: str = ""      # Kobo BookmarkID of the source highlight
     tags: List[str] = field(default_factory=list)  # Free concept tags (2-3) → Key Word
     categories: List[str] = field(default_factory=list)  # Fixed Tags classification (1-2)
+    icon: str = ""                    # Notion page icon emoji (from _ICON_PALETTE)
     # --- review gate (local only; never written to Notion) ---
     review_status: str = "pending"    # pending / passed / rejected
     review_scores: Dict[str, int] = field(default_factory=dict)  # 四維 1-5
@@ -171,6 +172,7 @@ class ZettelkastenCard:
             'source_bookmark_id': self.source_bookmark_id,
             'tags': self.tags,
             'categories': self.categories,
+            'icon': self.icon,
             'review_status': self.review_status,
             'review_scores': self.review_scores,
             'review_notes': self.review_notes,
@@ -197,6 +199,7 @@ class ZettelkastenCard:
             source_bookmark_id=d.get('source_bookmark_id', '') or '',
             tags=list(d.get('tags') or []),
             categories=list(d.get('categories') or []),
+            icon=d.get('icon', '') or '',
             review_status=d.get('review_status', 'pending') or 'pending',
             review_scores=dict(d.get('review_scores') or {}),
             review_notes=d.get('review_notes', '') or '',
