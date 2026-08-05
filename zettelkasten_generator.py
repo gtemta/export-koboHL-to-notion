@@ -666,17 +666,33 @@ class ZettelkastenLLMEnhancer:
         return _ICON_PALETTE[0]
 
     @classmethod
+    def _pick_palette_emoji(cls, text: str) -> str:
+        """文字中第一個落在 _ICON_PALETTE 的 emoji，沒有則回空字串。
+
+        因為調色盤與分類自帶的 emoji 零交集，且 prompt 給模型的分類名已去 emoji，
+        所以行內出現的調色盤 emoji 必為模型挑的 icon —— 可以放心掃整行，
+        不必依賴模型有沒有照 `｜` 格式輸出。
+        """
+        for ch in text or "":
+            if ch in _ICON_PALETTE_SET:
+                return ch
+        return ""
+
+    _ICON_SEPARATOR = re.compile(r'[｜|]')
+
+    @classmethod
     def _parse_classification(
         cls, text: str, n: int, allowed: List[str]
-    ) -> List[List[str]]:
-        """Parse `CARD_i: 分類A、分類B` lines into per-card category lists.
+    ) -> List[Tuple[List[str], str]]:
+        """Parse `CARD_i: 分類A、分類B｜emoji` lines into per-card (categories, icon).
 
         Category names are matched on their text core (emoji-insensitive) and
         written back as the canonical `allowed` value, so Notion multi_select
-        options keep their emoji prefix. At most 2 per card; cards with no
-        valid category get []. Pure — no Ollama, unit-testable.
+        options keep their emoji prefix. At most 2 categories per card; the icon
+        is `""` when the model gave none or gave one outside the palette.
+        Pure — no Ollama, unit-testable.
         """
-        result: List[List[str]] = [[] for _ in range(n)]
+        result: List[Tuple[List[str], str]] = [([], "") for _ in range(n)]
         if not text or not allowed:
             return result
         canonical = {cls._category_core(a): a for a in allowed if cls._category_core(a)}
@@ -691,14 +707,17 @@ class ZettelkastenLLMEnhancer:
                 continue
             if not (1 <= idx <= n):
                 continue
+            remainder = m.group(2).strip()
+            # 分類只看 ｜ 之前，icon 掃整行（模型常常不照格式）
+            category_part = cls._ICON_SEPARATOR.split(remainder, maxsplit=1)[0]
             picked: List[str] = []
-            for part in cls._CLASSIFY_SPLIT.split(m.group(2).strip()):
+            for part in cls._CLASSIFY_SPLIT.split(category_part.strip()):
                 name = canonical.get(cls._category_core(part))
                 if name and name not in picked:
                     picked.append(name)
                 if len(picked) >= 2:
                     break
-            result[idx - 1] = picked
+            result[idx - 1] = (picked, cls._pick_palette_emoji(remainder))
         return result
 
     def _build_classification_prompt(
@@ -711,33 +730,45 @@ class ZettelkastenLLMEnhancer:
         for i, c in enumerate(cards, start=1):
             card_blocks.append(f"CARD_{i}：{c.title}｜{c.content}")
         cards_section = "\n".join(card_blocks)
-        return f"""你是一位知識分類助理。以下是 {len(cards)} 張卡片筆記，請為每張卡片挑選最貼切的分類。
+        icons = " ".join(_ICON_PALETTE)
+        return f"""你是一位知識分類助理。以下是 {len(cards)} 張卡片筆記，請為每張卡片挑選最貼切的分類與一個代表 emoji。
 
 可用分類（只能從這裡挑，不可自創）：
 {allowed}
+
+可用 emoji（只能從這裡挑，不可自創）：
+{icons}
 
 卡片：
 {cards_section}
 
 規則：
 1. 每張卡片挑 1-2 個最貼切的分類，只能從上面清單挑，用頓號（、）分隔
-2. 如果沒有任何分類貼切，該卡片留空（不要硬塞、不要發明新分類）
-3. 嚴格依照格式逐行輸出，每張卡片一行：CARD_編號：分類
-4. 不要加任何解釋或結語
+2. 如果沒有任何分類貼切，該卡片分類留空（不要硬塞、不要發明新分類）
+3. 每張卡片再挑「一個」最能代表它的 emoji，只能從上面的 emoji 清單挑
+4. 嚴格依照格式逐行輸出，每張卡片一行：CARD_編號：分類｜emoji
+5. 不要加任何解釋或結語
 
 請直接輸出："""
 
     def classify_cards(
         self, cards: List[ZettelkastenCard], categories: List[str],
         book_title: str = "",
-    ) -> None:
-        """Assign fixed-category Tags to each card in place via one Ollama call.
+    ) -> bool:
+        """Assign fixed-category Tags + a page icon to each card in place.
 
-        No-op if there are no cards or no category list. On any Ollama failure
-        the cards simply keep empty `categories` (left for manual tagging).
+        One Ollama call per book. Returns whether the response was parseable at
+        all — callers (the visual backfill tool) use it to tell "the model
+        didn't pick for this card" apart from "the whole call failed", so a
+        failed batch can be retried later instead of being frozen with
+        rule-based icons.
+
+        No-op returning False if there are no cards or no category list. On any
+        Ollama failure the cards keep empty `categories`; `icon` still gets a
+        deterministic fallback so it is never blank.
         """
         if not cards or not categories:
-            return
+            return False
 
         prompt = self._build_classification_prompt(cards, categories)
         logger.info(
@@ -760,11 +791,22 @@ class ZettelkastenLLMEnhancer:
         logger.debug(f"Ollama classify raw response ({len(raw)} chars): {raw[:500]}")
         parsed = self._parse_classification(raw, len(cards), categories)
         assigned = 0
-        for card, cats in zip(cards, parsed):
+        model_icons = 0
+        for card, (cats, icon) in zip(cards, parsed):
             card.categories = cats
+            # 先寫 categories，_fallback_icon 才吃得到分類預設
+            card.icon = icon or self._fallback_icon(card)
             if cats:
                 assigned += 1
-        logger.info(f"Ollama classify done: {assigned}/{len(cards)} cards tagged")
+            if icon:
+                model_icons += 1
+        parsed_ok = any(cats or icon for cats, icon in parsed)
+        logger.info(
+            f"Ollama classify done: {assigned}/{len(cards)} cards tagged, "
+            f"{model_icons}/{len(cards)} icons from model "
+            f"({len(cards) - model_icons} via fallback)"
+        )
+        return parsed_ok
 
     def _build_batch_prompt(self, highlights: List[Dict], book_title: str = "") -> str:
         n = len(highlights)

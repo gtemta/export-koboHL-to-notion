@@ -12,46 +12,95 @@ ALLOWED = ["💞心理學", "🧠學習技巧", "💼商務", "🧘‍♂️人�
 
 
 class TestParseClassification(unittest.TestCase):
-    """E3: per-card `CARD_i: 分類` lines → filtered category lists."""
+    """E3: 每行 `CARD_i：分類｜emoji` → (categories, icon)。"""
 
     def test_basic_lines(self):
-        text = "CARD_1：💞心理學、🧠學習技巧\nCARD_2：💼商務"
+        text = "CARD_1：💞心理學、🧠學習技巧｜🧭\nCARD_2：💼商務｜🎯"
         parsed = ZettelkastenLLMEnhancer._parse_classification(text, 2, ALLOWED)
-        self.assertEqual(parsed, [["💞心理學", "🧠學習技巧"], ["💼商務"]])
+        self.assertEqual(
+            parsed, [(["💞心理學", "🧠學習技巧"], "🧭"), (["💼商務"], "🎯")])
 
     def test_drops_values_outside_allowed(self):
-        text = "CARD_1：💞心理學、亂造的分類"
+        text = "CARD_1：💞心理學、亂造的分類｜🧭"
         parsed = ZettelkastenLLMEnhancer._parse_classification(text, 1, ALLOWED)
-        self.assertEqual(parsed, [["💞心理學"]])
+        self.assertEqual(parsed, [(["💞心理學"], "🧭")])
 
     def test_empty_when_nothing_matches(self):
         text = "CARD_1：完全不相關"
         parsed = ZettelkastenLLMEnhancer._parse_classification(text, 1, ALLOWED)
-        self.assertEqual(parsed, [[]])
+        self.assertEqual(parsed, [([], "")])
 
     def test_caps_at_two(self):
-        text = "CARD_1：💞心理學、🧠學習技巧、💼商務、🧘‍♂️人生觀點"
+        text = "CARD_1：💞心理學、🧠學習技巧、💼商務、🧘‍♂️人生觀點｜🧭"
         parsed = ZettelkastenLLMEnhancer._parse_classification(text, 1, ALLOWED)
-        self.assertEqual(len(parsed[0]), 2)
+        self.assertEqual(len(parsed[0][0]), 2)
 
     def test_missing_card_stays_empty(self):
-        text = "CARD_1：💞心理學"
+        text = "CARD_1：💞心理學｜🧭"
         parsed = ZettelkastenLLMEnhancer._parse_classification(text, 3, ALLOWED)
-        self.assertEqual(parsed, [["💞心理學"], [], []])
+        self.assertEqual(parsed, [(["💞心理學"], "🧭"), ([], ""), ([], "")])
 
     def test_out_of_range_index_ignored(self):
-        text = "CARD_9：💞心理學"
+        text = "CARD_9：💞心理學｜🧭"
         parsed = ZettelkastenLLMEnhancer._parse_classification(text, 2, ALLOWED)
-        self.assertEqual(parsed, [[], []])
+        self.assertEqual(parsed, [([], ""), ([], "")])
 
     def test_strips_thinking_prefix(self):
-        text = "Thinking...\nreasoning\n...done thinking.\nCARD_1：💼商務"
+        text = "Thinking...\nreasoning\n...done thinking.\nCARD_1：💼商務｜🎯"
         parsed = ZettelkastenLLMEnhancer._parse_classification(text, 1, ALLOWED)
-        self.assertEqual(parsed, [["💼商務"]])
+        self.assertEqual(parsed, [(["💼商務"], "🎯")])
 
     def test_no_allowed_list_returns_empty(self):
-        parsed = ZettelkastenLLMEnhancer._parse_classification("CARD_1：x", 1, [])
-        self.assertEqual(parsed, [[]])
+        parsed = ZettelkastenLLMEnhancer._parse_classification("CARD_1：x｜🧭", 1, [])
+        self.assertEqual(parsed, [([], "")])
+
+
+class TestParseIcon(unittest.TestCase):
+    """icon 解析的容錯 —— 本地小模型幾乎不會完全照格式。"""
+
+    def test_halfwidth_pipe(self):
+        parsed = ZettelkastenLLMEnhancer._parse_classification(
+            "CARD_1：💼商務|🎯", 1, ALLOWED)
+        self.assertEqual(parsed, [(["💼商務"], "🎯")])
+
+    def test_missing_icon_leaves_empty(self):
+        parsed = ZettelkastenLLMEnhancer._parse_classification(
+            "CARD_1：💼商務", 1, ALLOWED)
+        self.assertEqual(parsed, [(["💼商務"], "")])
+
+    def test_off_palette_icon_rejected(self):
+        # 🍕 不在調色盤裡 → 視同沒挑，交給 fallback
+        parsed = ZettelkastenLLMEnhancer._parse_classification(
+            "CARD_1：💼商務｜🍕", 1, ALLOWED)
+        self.assertEqual(parsed, [(["💼商務"], "")])
+
+    def test_icon_found_without_separator(self):
+        # 格式跑掉但行內有調色盤 emoji → 仍然抓得到
+        parsed = ZettelkastenLLMEnhancer._parse_classification(
+            "CARD_1：💼商務 🎯", 1, ALLOWED)
+        self.assertEqual(parsed, [(["💼商務"], "🎯")])
+
+    def test_first_palette_emoji_wins(self):
+        parsed = ZettelkastenLLMEnhancer._parse_classification(
+            "CARD_1：💼商務｜🎯 🧭", 1, ALLOWED)
+        self.assertEqual(parsed[0][1], "🎯")
+
+    def test_category_emoji_never_mistaken_for_icon(self):
+        # 分類自帶的 emoji 與調色盤零交集，所以不會被誤判成 icon
+        parsed = ZettelkastenLLMEnhancer._parse_classification(
+            "CARD_1：💞心理學", 1, ALLOWED)
+        self.assertEqual(parsed, [(["💞心理學"], "")])
+
+    def test_icon_only_line_still_parses(self):
+        parsed = ZettelkastenLLMEnhancer._parse_classification(
+            "CARD_1：｜🧭", 1, ALLOWED)
+        self.assertEqual(parsed, [([], "🧭")])
+
+    def test_pick_palette_emoji_direct(self):
+        pick = ZettelkastenLLMEnhancer._pick_palette_emoji
+        self.assertEqual(pick("前面 🧭 後面"), "🧭")
+        self.assertEqual(pick("沒有 emoji"), "")
+        self.assertEqual(pick(""), "")
 
 
 class TestEmojiInsensitiveMatching(unittest.TestCase):
@@ -59,31 +108,31 @@ class TestEmojiInsensitiveMatching(unittest.TestCase):
     plain-text name back to the canonical (emoji-prefixed) category."""
 
     def test_plain_text_maps_to_canonical(self):
-        text = "CARD_1：心理學、學習技巧"
+        text = "CARD_1：心理學、學習技巧｜🧭"
         parsed = ZettelkastenLLMEnhancer._parse_classification(text, 1, ALLOWED)
-        self.assertEqual(parsed, [["💞心理學", "🧠學習技巧"]])
+        self.assertEqual(parsed, [(["💞心理學", "🧠學習技巧"], "🧭")])
 
     def test_zwj_emoji_category_plain_output(self):
         # 🧘‍♂️ is a multi-codepoint ZWJ sequence; plain output must still match.
-        text = "CARD_1：人生觀點"
+        text = "CARD_1：人生觀點｜🧭"
         parsed = ZettelkastenLLMEnhancer._parse_classification(text, 1, ALLOWED)
-        self.assertEqual(parsed, [["🧘‍♂️人生觀點"]])
+        self.assertEqual(parsed, [(["🧘‍♂️人生觀點"], "🧭")])
 
     def test_mangled_emoji_still_matches(self):
         # model echoes a partial emoji (🧘 without ZWJ+♂️+VS16)
-        text = "CARD_1：🧘人生觀點"
+        text = "CARD_1：🧘人生觀點｜🧭"
         parsed = ZettelkastenLLMEnhancer._parse_classification(text, 1, ALLOWED)
-        self.assertEqual(parsed, [["🧘‍♂️人生觀點"]])
+        self.assertEqual(parsed, [(["🧘‍♂️人生觀點"], "🧭")])
 
     def test_exact_emoji_output_still_matches(self):
-        text = "CARD_1：💞心理學"
+        text = "CARD_1：💞心理學｜🧭"
         parsed = ZettelkastenLLMEnhancer._parse_classification(text, 1, ALLOWED)
-        self.assertEqual(parsed, [["💞心理學"]])
+        self.assertEqual(parsed, [(["💞心理學"], "🧭")])
 
     def test_invented_category_still_dropped(self):
-        text = "CARD_1：心理學、量子力學"
+        text = "CARD_1：心理學、量子力學｜🧭"
         parsed = ZettelkastenLLMEnhancer._parse_classification(text, 1, ALLOWED)
-        self.assertEqual(parsed, [["💞心理學"]])
+        self.assertEqual(parsed, [(["💞心理學"], "🧭")])
 
     def test_category_core(self):
         core = ZettelkastenLLMEnhancer._category_core
@@ -101,6 +150,16 @@ class TestEmojiInsensitiveMatching(unittest.TestCase):
         prompt = enhancer._build_classification_prompt([card], ALLOWED)
         self.assertIn("心理學", prompt)
         self.assertNotIn("💞心理學", prompt)
+
+    def test_prompt_lists_icon_palette(self):
+        enhancer = ZettelkastenLLMEnhancer()
+        card = ZettelkastenCard(
+            id="x", title="t", content="c", source_highlight="h",
+            chapter_reference="ch", chapter_progress=0.0,
+        )
+        prompt = enhancer._build_classification_prompt([card], ALLOWED)
+        self.assertIn("🧭", prompt)
+        self.assertIn("｜", prompt)
 
 
 class TestBookTitleMatching(unittest.TestCase):
