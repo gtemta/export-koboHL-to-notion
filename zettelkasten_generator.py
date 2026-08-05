@@ -206,6 +206,52 @@ class ZettelkastenCard:
         )
 
 
+# ----- page icon 調色盤 -----
+# 兩條不變條件（有測試把關，見 tests/unit/test_card_icons.py）：
+#   1. 每個元素恰為 1 個 codepoint，不含 ZWJ / variation selector / 膚色修飾符
+#      —— 多碼點序列是 Notion icon 最常見的拒收原因，會讓整張卡建立失敗。
+#   2. 與分類自帶的 emoji 零交集 —— parser 靠「行內出現的調色盤 emoji 必為
+#      模型挑的 icon」判讀，兩者相交這條規則就只是機率上成立。
+# 讓模型「從清單裡挑」而非自由生成，因此不需要任何 codepoint 驗證邏輯。
+_ICON_PALETTE = (
+    "🧭", "🪞", "🎯", "🔑", "🧪", "🌱", "🔁", "🪜", "🧱", "🔍",
+    "💡", "🧨", "🚧", "🪤", "🎭", "🧊", "🔥", "🌊", "🌉", "🚀",
+    "🧬", "🦴", "🩺", "🪐", "📉", "🧯", "🪺", "🫧", "🪃", "🧲",
+    "🪢", "🌀", "🍀", "🐘", "🦉", "🐜", "🌗", "🧵", "🪟", "🚪",
+)
+_ICON_PALETTE_SET = frozenset(_ICON_PALETTE)
+
+# 關鍵字 → icon。模型沒挑或挑了清單外的值時接手；值必須取自 _ICON_PALETTE。
+_ICON_KEYWORD_HINTS = (
+    (("習慣", "循環", "重複", "迴圈"), "🔁"),
+    (("風險", "陷阱", "偏誤", "謬誤"), "🪤"),
+    (("方向", "選擇", "決策", "策略"), "🧭"),
+    (("時間", "階段", "週期"), "🌗"),
+    (("學習", "練習", "記憶"), "🧪"),
+    (("關係", "連結", "網絡"), "🪢"),
+    (("成長", "起點", "萌芽"), "🌱"),
+    (("情緒", "動機", "慾望"), "🔥"),
+    (("溝通", "表達", "敘事"), "🎭"),
+    (("金錢", "投資", "資產", "成本"), "🧯"),
+    (("結構", "系統", "框架"), "🧱"),
+    (("觀察", "洞察", "發現"), "🔍"),
+)
+
+# 分類 text core → 預設 icon（同樣取自 _ICON_PALETTE，且刻意不用分類自帶的 emoji）。
+_CATEGORY_ICON_DEFAULTS = {
+    "心理學": "🪺",
+    "學習技巧": "🧪",
+    "商務": "🪐",
+    "人生觀點": "🧭",
+    "邏輯思考": "🪢",
+    "哲學科學": "🧬",
+    "軟體工程": "🧱",
+    "行銷": "🎯",
+    "專案管理": "🪜",
+    "理財投資": "🧯",
+}
+
+
 class CardSelectionAlgorithm:
     """Algorithm for selecting the most valuable highlights for card generation"""
 
@@ -598,6 +644,23 @@ class ZettelkastenLLMEnhancer:
             ch for ch in (name or "")
             if unicodedata.category(ch)[0] in ("L", "N")
         )
+
+    @classmethod
+    def _fallback_icon(cls, card: 'ZettelkastenCard') -> str:
+        """模型沒給 icon（或給了清單外的值）時的決定性遞補。
+
+        扛「同一本書的卡彼此可辨」的是 icon，而 icon 來自本地小模型，
+        所以這不是裝飾而是保底 —— 保證 icon 永不空白。
+        """
+        haystack = "".join(card.tags or []) + (card.title or "")
+        for keywords, emoji in _ICON_KEYWORD_HINTS:
+            if any(k in haystack for k in keywords):
+                return emoji
+        for category in card.categories or []:
+            emoji = _CATEGORY_ICON_DEFAULTS.get(cls._category_core(category))
+            if emoji:
+                return emoji
+        return _ICON_PALETTE[0]
 
     @classmethod
     def _parse_classification(
