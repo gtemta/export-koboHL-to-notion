@@ -681,6 +681,43 @@ class ZettelkastenLLMEnhancer:
     _ICON_SEPARATOR = re.compile(r'[｜|]')
 
     @classmethod
+    def _iter_matched_card_lines(cls, text: str, n: int):
+        """Yield `(idx, remainder)` for each `CARD_i:` line whose index is in
+        `1..n`, regardless of what (if anything) it goes on to contain.
+
+        Shared by `_parse_classification` (which extracts categories/icon from
+        `remainder`) and `classify_cards` (which only needs to know whether the
+        raw response matched the expected format at all — see
+        `_response_has_card_lines`). Keeping the line-matching logic in one
+        place means the two can't drift apart on what counts as "matched".
+        """
+        if not text:
+            return
+        cleaned = cls._strip_thinking(text)
+        for line in cleaned.splitlines():
+            m = cls._CLASSIFY_LINE.search(line)
+            if not m:
+                continue
+            try:
+                idx = int(m.group(1))
+            except ValueError:
+                continue
+            if 1 <= idx <= n:
+                yield idx, m.group(2).strip()
+
+    @classmethod
+    def _response_has_card_lines(cls, text: str, n: int) -> bool:
+        """Whether the raw response contains at least one recognizable
+        `CARD_i:` line — i.e. whether it was parseable at all, independent of
+        whether any card actually got a usable category or icon out of it.
+
+        `classify_cards` returns this (not "did anything get extracted") so
+        callers can tell a well-formed response where the model legitimately
+        picked nothing usable apart from a genuinely unparseable/empty one.
+        """
+        return any(True for _ in cls._iter_matched_card_lines(text, n))
+
+    @classmethod
     def _parse_classification(
         cls, text: str, n: int, allowed: List[str]
     ) -> List[Tuple[List[str], str]]:
@@ -696,18 +733,7 @@ class ZettelkastenLLMEnhancer:
         if not text or not allowed:
             return result
         canonical = {cls._category_core(a): a for a in allowed if cls._category_core(a)}
-        cleaned = cls._strip_thinking(text)
-        for line in cleaned.splitlines():
-            m = cls._CLASSIFY_LINE.search(line)
-            if not m:
-                continue
-            try:
-                idx = int(m.group(1))
-            except ValueError:
-                continue
-            if not (1 <= idx <= n):
-                continue
-            remainder = m.group(2).strip()
+        for idx, remainder in cls._iter_matched_card_lines(text, n):
             # 分類只看 ｜ 之前，icon 掃整行（模型常常不照格式）
             category_part = cls._ICON_SEPARATOR.split(remainder, maxsplit=1)[0]
             picked: List[str] = []
@@ -757,11 +783,14 @@ class ZettelkastenLLMEnhancer:
     ) -> bool:
         """Assign fixed-category Tags + a page icon to each card in place.
 
-        One Ollama call per book. Returns whether the response was parseable at
-        all — callers (the visual backfill tool) use it to tell "the model
-        didn't pick for this card" apart from "the whole call failed", so a
-        failed batch can be retried later instead of being frozen with
-        rule-based icons.
+        One Ollama call per book. Returns whether the raw response contained at
+        least one recognizable `CARD_i:` line (see `_response_has_card_lines`) —
+        callers (the visual backfill tool) use it to tell "the model responded
+        but legitimately picked nothing usable for any card" apart from "the
+        whole call failed / came back empty / unparseable", so only the latter
+        gets retried later instead of being frozen with rule-based icons. A
+        well-formed response where every card's categories/icon end up empty
+        still returns True.
 
         No-op returning False if there are no cards or no category list. On any
         Ollama failure the cards keep empty `categories`; `icon` still gets a
@@ -800,7 +829,7 @@ class ZettelkastenLLMEnhancer:
                 assigned += 1
             if icon:
                 model_icons += 1
-        parsed_ok = any(cats or icon for cats, icon in parsed)
+        parsed_ok = self._response_has_card_lines(raw, len(cards))
         logger.info(
             f"Ollama classify done: {assigned}/{len(cards)} cards tagged, "
             f"{model_icons}/{len(cards)} icons from model "

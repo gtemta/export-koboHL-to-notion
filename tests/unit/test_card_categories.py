@@ -1,6 +1,7 @@
 """Phase 1 unit tests: classification parsing (E3), book-title matching (E4),
 tag-category settings, and ZettelkastenCard.categories back-compat."""
 import unittest
+from unittest.mock import patch
 
 from src.config.settings import DEFAULT_TAG_CATEGORIES, Settings
 from src.infrastructure.notion.zettelkasten_card_repository import (
@@ -9,6 +10,13 @@ from src.infrastructure.notion.zettelkasten_card_repository import (
 from zettelkasten_generator import ZettelkastenCard, ZettelkastenLLMEnhancer
 
 ALLOWED = ["💞心理學", "🧠學習技巧", "💼商務", "🧘‍♂️人生觀點"]
+
+
+def _make_card(card_id: str, title: str = "t") -> ZettelkastenCard:
+    return ZettelkastenCard(
+        id=card_id, title=title, content="c", source_highlight="h",
+        chapter_reference="ch", chapter_progress=0.0,
+    )
 
 
 class TestParseClassification(unittest.TestCase):
@@ -160,6 +168,98 @@ class TestEmojiInsensitiveMatching(unittest.TestCase):
         prompt = enhancer._build_classification_prompt([card], ALLOWED)
         self.assertIn("🧭", prompt)
         self.assertIn("｜", prompt)
+
+
+class TestResponseHasCardLines(unittest.TestCase):
+    """`_response_has_card_lines` answers "was the response parseable at
+    all" — independent of whether anything usable was actually extracted."""
+
+    def test_true_when_line_matches_even_with_nothing_usable(self):
+        # Well-formed CARD_1 line, but hallucinated category + no palette icon.
+        text = "CARD_1：完全亂造的分類｜🍕"
+        self.assertTrue(ZettelkastenLLMEnhancer._response_has_card_lines(text, 1))
+
+    def test_false_for_empty_text(self):
+        self.assertFalse(ZettelkastenLLMEnhancer._response_has_card_lines("", 1))
+
+    def test_false_when_no_card_line_matches(self):
+        text = "抱歉，我無法完成這個任務。"
+        self.assertFalse(ZettelkastenLLMEnhancer._response_has_card_lines(text, 3))
+
+    def test_false_when_index_out_of_range(self):
+        text = "CARD_9：💞心理學｜🧭"
+        self.assertFalse(ZettelkastenLLMEnhancer._response_has_card_lines(text, 2))
+
+    def test_true_when_at_least_one_of_several_matches(self):
+        text = "CARD_9：out of range\nCARD_1：💼商務｜🎯"
+        self.assertTrue(ZettelkastenLLMEnhancer._response_has_card_lines(text, 2))
+
+
+class TestClassifyCards(unittest.TestCase):
+    """classify_cards itself — stubbing the Ollama call closes two gaps the
+    sub-piece tests (TestParseClassification etc.) can't: the categories-
+    before-icon ordering, and what the method actually returns."""
+
+    def test_parseable_response_with_nothing_usable_returns_true(self):
+        # Model responded in the right shape but picked nothing valid for any
+        # card (hallucinated category, off-palette icon) — still parseable.
+        card = _make_card("1")
+        with patch(
+            "zettelkasten_generator._ollama_generate",
+            return_value="CARD_1：完全亂造的分類｜🍕",
+        ):
+            enhancer = ZettelkastenLLMEnhancer()
+            result = enhancer.classify_cards([card], ALLOWED, "book")
+        self.assertTrue(result)
+        self.assertEqual(card.categories, [])
+        # icon must still be non-empty via fallback even though the model
+        # gave nothing usable.
+        self.assertNotEqual(card.icon, "")
+
+    def test_empty_response_returns_false(self):
+        card = _make_card("1")
+        with patch("zettelkasten_generator._ollama_generate", return_value=""):
+            enhancer = ZettelkastenLLMEnhancer()
+            result = enhancer.classify_cards([card], ALLOWED, "book")
+        self.assertFalse(result)
+        self.assertEqual(card.categories, [])
+        self.assertNotEqual(card.icon, "")  # fallback still fires
+
+    def test_categories_written_before_icon_fallback_reads_them(self):
+        # No model icon (off-palette), but a matched category whose text core
+        # has a _CATEGORY_ICON_DEFAULTS entry ("商務" -> "🪐"). If classify_cards
+        # assigned icon before categories, _fallback_icon would see an empty
+        # categories list and never reach the category-default tier.
+        card = _make_card("1")
+        with patch(
+            "zettelkasten_generator._ollama_generate",
+            return_value="CARD_1：💼商務｜🍕",
+        ):
+            enhancer = ZettelkastenLLMEnhancer()
+            enhancer.classify_cards([card], ALLOWED, "book")
+        self.assertEqual(card.categories, ["💼商務"])
+        self.assertEqual(card.icon, "🪐")
+
+    def test_valid_category_and_icon_returns_true(self):
+        card = _make_card("1")
+        with patch(
+            "zettelkasten_generator._ollama_generate",
+            return_value="CARD_1：💼商務｜🎯",
+        ):
+            enhancer = ZettelkastenLLMEnhancer()
+            result = enhancer.classify_cards([card], ALLOWED, "book")
+        self.assertTrue(result)
+        self.assertEqual(card.categories, ["💼商務"])
+        self.assertEqual(card.icon, "🎯")
+
+    def test_no_cards_returns_false(self):
+        enhancer = ZettelkastenLLMEnhancer()
+        self.assertFalse(enhancer.classify_cards([], ALLOWED, "book"))
+
+    def test_no_categories_returns_false(self):
+        card = _make_card("1")
+        enhancer = ZettelkastenLLMEnhancer()
+        self.assertFalse(enhancer.classify_cards([card], [], "book"))
 
 
 class TestBookTitleMatching(unittest.TestCase):
