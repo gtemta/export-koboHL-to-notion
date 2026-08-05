@@ -7,6 +7,13 @@ property if the DB has it (see _wants):
   - Key Word (rich_text)   — free concept tags, joined by 、
   - Tags (multi_select)    — fixed-category classification
   - 來源劃線ID (rich_text)  — source-highlight id, enables per-highlight dedup
+  - 加工狀態 (select)      — revisit stage, seeded 🌱未加工 on every new card
+  - 建立日期 (created_time) — set by Notion itself, so existing cards get a
+                             value with no backfill needed
+  - 上次回顧 (date)         — manual, not written on create; user fills it in
+Every card also gets a page `cover` (Notion built-in gradient, keyed off the
+card's first category — see card_visuals.cover_url_for) and, when the card has
+one, an `icon` (single emoji from zettelkasten_generator's palette).
 Card content / source highlight / chapter reference go into the page body
 as blocks.
 
@@ -24,6 +31,7 @@ from notion_client import Client
 # zettelkasten_generator lives at project root (not yet ported into src/)
 from zettelkasten_generator import ZettelkastenCard
 
+from .card_visuals import cover_url_for
 from .rate_limiter import NotionRateLimiter
 from .retry_policy import retry_with_backoff
 
@@ -46,6 +54,16 @@ _BOOK_STATUS_DONE = "🔖閱讀完畢"
 _BOOK_STATUS_READING = "📖 閱讀中"
 # Kobo ___PercentRead is 0-100; at/above this the book counts as finished.
 _BOOK_DONE_PERCENT = 99
+
+# 回訪機制用的欄位。加工狀態刻意不叫「狀態」——審核年代那個已退役的 `狀態` 欄
+# 語意完全不同（見 docs/NOTION_OUTPUT_IMPROVEMENTS.md），同名會混淆。
+_STAGE_PROPERTY = "加工狀態"
+_STAGE_UNPROCESSED = "🌱未加工"
+_STAGE_REWRITTEN = "🌿已重寫"
+_STAGE_PERMANENT = "🌳永久筆記"
+# 建立日期用 Notion 的 created_time 型別：值由 Notion 自己算，舊卡也立即有值。
+_CREATED_PROPERTY = "建立日期"
+_REVIEWED_PROPERTY = "上次回顧"
 
 # sentinel: schema not yet fetched (distinct from "fetched, empty/unreadable").
 _UNSET = object()
@@ -129,11 +147,15 @@ class ZettelkastenCardRepository:
             try:
                 properties = self._build_properties(card, books_page_id)
                 children = self._build_children(card)
+                visuals = self._build_visuals(card)
                 retry_with_backoff(
-                    lambda p=properties, c=children: self._client.pages.create(
-                        parent={"database_id": self._database_id},
-                        properties=p,
-                        children=c,
+                    lambda p=properties, c=children, v=visuals: (
+                        self._client.pages.create(
+                            parent={"database_id": self._database_id},
+                            properties=p,
+                            children=c,
+                            **v,
+                        )
                     ),
                     self._rate_limiter,
                 )
@@ -188,6 +210,8 @@ class ZettelkastenCardRepository:
         if tags_update is not None:
             to_add[_TAGS_PROPERTY] = tags_update
 
+        to_add.update(self._schema_additions(existing))
+
         if not to_add:
             return
         try:
@@ -222,6 +246,46 @@ class ZettelkastenCardRepository:
             return None
         merged = [{"name": n} for n in current if n] + [{"name": c} for c in missing]
         return {"multi_select": {"options": merged}}
+
+    @staticmethod
+    def _schema_additions(existing: dict) -> dict:
+        """回訪欄位中，卡片盒還缺的那些的 databases.update body（純函式）。"""
+        to_add: dict = {}
+        if _STAGE_PROPERTY not in (existing or {}):
+            to_add[_STAGE_PROPERTY] = {
+                "select": {
+                    "options": [
+                        {"name": _STAGE_UNPROCESSED},
+                        {"name": _STAGE_REWRITTEN},
+                        {"name": _STAGE_PERMANENT},
+                    ]
+                }
+            }
+        if _CREATED_PROPERTY not in (existing or {}):
+            to_add[_CREATED_PROPERTY] = {"created_time": {}}
+        if _REVIEWED_PROPERTY not in (existing or {}):
+            to_add[_REVIEWED_PROPERTY] = {"date": {}}
+        return to_add
+
+    @staticmethod
+    def _build_visuals(card: ZettelkastenCard) -> dict:
+        """pages.create 的 icon / cover kwargs。
+
+        cover 永遠有值（無分類也有預設色）；icon 為空時整個 key 不送 ——
+        Notion 收到 icon=None 會拒收整張卡。
+        """
+        visuals: dict = {
+            "cover": {
+                "type": "external",
+                "external": {
+                    "url": cover_url_for(getattr(card, "categories", None))
+                },
+            }
+        }
+        icon = (getattr(card, "icon", "") or "").strip()
+        if icon:
+            visuals["icon"] = {"type": "emoji", "emoji": icon}
+        return visuals
 
     def _find_book_page(
         self,
@@ -592,6 +656,8 @@ class ZettelkastenCardRepository:
             props[_TAGS_PROPERTY] = {
                 "multi_select": [{"name": c} for c in categories]
             }
+        if self._wants(_STAGE_PROPERTY):
+            props[_STAGE_PROPERTY] = {"select": {"name": _STAGE_UNPROCESSED}}
         if books_page_id and self._wants("來源"):
             props["來源"] = {"relation": [{"id": books_page_id}]}
         return props
