@@ -27,7 +27,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   「卡片 → cover/icon」）／不帶 `--dry-run` 正式寫回。為卡片盒既有卡片補上 cover
   （依 Tags 純規則）、page icon（標題＋Key Word 批次送 Ollama 挑 emoji）與
   `加工狀態=🌱未加工`。**已有值一律不覆蓋** → 重跑冪等，也不會蓋掉手動換過的圖。
-  Ollama 不可用時只補 cover，icon 留待下次重跑。
+  Ollama 不可用時只補 cover，icon 留待下次重跑。**順序要求**：若卡片盒裡還有
+  卡片缺 來源/Tags，先跑 `backfill_zettelkasten.py` 補齊分類，**再**跑這支工具
+  ——cover 依 Tags 挑色且已有 cover 不覆蓋，若順序反過來，沒 Tags 的卡先拿到
+  預設米色 cover，之後 Tags 補上了也不會回頭補色（不寫覆蓋邏輯是刻意的，避免
+  蓋掉使用者手動換過的圖）。
 
 ### Quality gates
 - **Lint**: `python -m ruff check .` (config in `pyproject.toml`; `legacy/` + `analysis/` excluded)
@@ -161,7 +165,15 @@ to the generator, persists the batch via `CardStore`, then uploads through
   `classify_cards` 回傳 bool 表示「回應是否可解析」，讓回填工具能區分「模型沒挑
   這張」與「整批呼叫失敗」。
 - **`_fallback_icon` 是保底不是裝飾**：扛「同書 16 張卡可辨」的是 icon，而 icon 來自
-  本地小模型；模型沒挑或挑了清單外的值時由關鍵字表／分類預設遞補，保證永不空白。
+  本地小模型；模型沒挑或挑了清單外的值時由關鍵字表／分類預設遞補，保證
+  `main.py`／`GenerateBookCardsUseCase` 這條路徑產的卡永不空白。**這個保證不涵蓋
+  `legacy/uploadToNotion.py`**：該路徑的 `ZettelkastenCardGenerator(...)` 建構時
+  不帶 `tag_categories`，`generate_cards_with_review` 只在 `self.tag_categories`
+  非空時才呼叫 `classify_cards`（icon 由它搭便車產生），所以 legacy 產的卡
+  `icon` 全空；`sync_zettelkasten_cards()` 的 `pages.create` 也完全沒有
+  `cover`/`icon`/`加工狀態` 三個 kwargs（甚至 properties 欄名都跟新 schema 不同，
+  如 `Title` 而非 `標題`）。經 legacy 入口建立的卡片一律沒有 cover/icon/加工狀態，
+  要靠 `tools/backfill_card_visuals.py` 事後補齊。
 - **`classify_cards(..., apply_icon_fallback=False)`**：預設 `True` 時保底邏輯內建
   在 `classify_cards` 裡執行；回填工具傳 `False` 跳過它，只拿模型的原始挑選結果
   （可能是空字串），再自己對照卡片在 Notion 上**真實**的 Tags 補保底——因為
