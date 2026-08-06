@@ -123,6 +123,53 @@ class TestBuildUpdate(unittest.TestCase):
         self.assertTrue(upd["cover"]["external"]["url"].startswith(_COVER_BASE))
 
 
+class TestBuildUpdateWriteStage(unittest.TestCase):
+    """write_stage threads through whether the 卡片盒 DB actually has the
+    加工狀態 column yet (see needs_work/build_update's write_stage param).
+    Writing it when the column doesn't exist 400s the whole pages.update —
+    cover and icon included, since they share one call (Finding 1)."""
+
+    def test_write_stage_false_omits_properties_key_entirely(self):
+        upd = build_update(_page(), icon="🧭", write_stage=False)
+        self.assertNotIn("properties", upd)
+        # cover/icon must still be written — only the stage write is skipped
+        self.assertIn("cover", upd)
+        self.assertEqual(upd["icon"], {"type": "emoji", "emoji": "🧭"})
+
+    def test_write_stage_false_still_omits_when_stage_already_missing(self):
+        # a page with cover+icon already set and no 加工狀態 value: with
+        # write_stage=False there is nothing left to write at all.
+        page = _page(cover={"external": {"url": "x"}}, icon={"emoji": "🧭"})
+        upd = build_update(page, icon="🧭", write_stage=False)
+        self.assertEqual(upd, {})
+
+    def test_write_stage_true_unchanged_behaviour(self):
+        # explicit write_stage=True must match the pre-existing default
+        # behaviour exercised by TestBuildUpdate.test_fills_all_three.
+        upd = build_update(_page(), icon="🧭", write_stage=True)
+        self.assertEqual(
+            upd["properties"][_STAGE_PROPERTY],
+            {"select": {"name": _STAGE_UNPROCESSED}},
+        )
+
+    def test_write_stage_defaults_to_true(self):
+        # existing call sites (and existing tests) call build_update without
+        # the new kwarg at all — behaviour must be unchanged for them.
+        upd = build_update(_page(), icon="🧭")
+        self.assertIn("properties", upd)
+
+
+class TestNeedsWorkWriteStage(unittest.TestCase):
+    def test_stage_only_missing_not_pending_when_write_stage_false(self):
+        page = _page(cover={"external": {"url": "x"}}, icon={"emoji": "🧭"})
+        self.assertTrue(needs_work(page))  # default: stage counts
+        self.assertFalse(needs_work(page, write_stage=False))
+
+    def test_still_pending_when_cover_missing_even_if_write_stage_false(self):
+        page = _page(icon={"emoji": "🧭"}, stage=_STAGE_UNPROCESSED)
+        self.assertTrue(needs_work(page, write_stage=False))
+
+
 class _HallucinatingEnhancer:
     """Fake `classify_cards`：把 card.categories 換成跟真實 Notion Tags不同的
     假分類（模擬模型幻覺），並且**確實遵守** `apply_icon_fallback` —— 跟真正

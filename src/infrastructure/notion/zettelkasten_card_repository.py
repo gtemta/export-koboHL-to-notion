@@ -177,6 +177,26 @@ class ZettelkastenCardRepository:
         auto-creating the page when the book isn't listed yet."""
         return self._find_book_page(book_title, source_page_id, percent_read)
 
+    def ensure_schema(self) -> None:
+        """Public entry for backfill tooling: create the optional 卡片盒
+        columns (加工狀態/建立日期/上次回顧/來源劃線ID) and seed Tags options
+        if missing. Idempotent — safe to call even if a sync already has.
+
+        Writes to the database schema, so callers must not invoke this from a
+        read-only / dry-run path (see has_property for the read-only check).
+        """
+        self._ensure_schema()
+
+    def has_property(self, prop_name: str) -> bool:
+        """Public entry for backfill tooling: whether the 卡片盒 DB currently
+        has a given property. Read-only (only triggers a schema fetch, never
+        a write) — safe to call from a dry-run path.
+
+        Mirrors _wants's fallback: True also when the schema couldn't be
+        read, so callers don't second-guess a property that might exist.
+        """
+        return self._wants(prop_name)
+
     # ----- Internals -----
 
     def _ensure_schema(self) -> None:

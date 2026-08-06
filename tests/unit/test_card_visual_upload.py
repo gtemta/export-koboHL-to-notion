@@ -107,6 +107,85 @@ class TestSchemaAdditions(unittest.TestCase):
         self.assertEqual(ZettelkastenCardRepository._schema_additions(existing), {})
 
 
+class TestPublicSchemaAccessors(unittest.TestCase):
+    """ensure_schema()/has_property() — the public surface backfill tooling
+    uses instead of reaching into _ensure_schema/_known_properties directly
+    (see tools/backfill_card_visuals.py)."""
+
+    def test_has_property_true_when_present(self):
+        repo = _repo()
+        repo._schema_props = {"標題", _STAGE_PROPERTY}
+        self.assertTrue(repo.has_property(_STAGE_PROPERTY))
+
+    def test_has_property_false_when_known_absent(self):
+        repo = _repo()
+        repo._schema_props = {"標題"}
+        self.assertFalse(repo.has_property(_STAGE_PROPERTY))
+
+    def test_has_property_true_when_schema_unreadable(self):
+        # mirrors _wants's fallback: don't second-guess when we can't tell
+        repo = ZettelkastenCardRepository(token="dummy", database_id="db")
+        repo._schema_props = None
+        self.assertTrue(repo.has_property(_STAGE_PROPERTY))
+
+    def test_has_property_never_writes(self):
+        # has_property must be safe to call from a --dry-run path: no
+        # databases.update call, ever — only a read (databases.retrieve).
+        repo = ZettelkastenCardRepository(token="dummy", database_id="db")
+
+        class _FakeDatabases:
+            def retrieve(self, database_id):
+                return {"properties": {"標題": {}}}
+
+            def update(self, **kwargs):
+                raise AssertionError("has_property must not write to the schema")
+
+        repo._client.databases = _FakeDatabases()
+        self.assertFalse(repo.has_property(_STAGE_PROPERTY))
+
+    def test_ensure_schema_creates_missing_columns(self):
+        repo = ZettelkastenCardRepository(token="dummy", database_id="db")
+        update_calls = []
+
+        class _FakeDatabases:
+            def retrieve(self, database_id):
+                return {"properties": {"標題": {}}}
+
+            def update(self, **kwargs):
+                update_calls.append(kwargs)
+                return {}
+
+        repo._client.databases = _FakeDatabases()
+        repo.ensure_schema()
+
+        self.assertEqual(len(update_calls), 1)
+        added = update_calls[0]["properties"]
+        self.assertIn(_STAGE_PROPERTY, added)
+        self.assertIn(_CREATED_PROPERTY, added)
+        self.assertIn(_REVIEWED_PROPERTY, added)
+
+    def test_ensure_schema_is_idempotent_within_a_process(self):
+        repo = ZettelkastenCardRepository(token="dummy", database_id="db")
+        retrieve_calls = []
+
+        class _FakeDatabases:
+            def retrieve(self, database_id):
+                retrieve_calls.append(database_id)
+                return {"properties": {
+                    "標題": {}, _STAGE_PROPERTY: {}, _CREATED_PROPERTY: {},
+                    _REVIEWED_PROPERTY: {},
+                }}
+
+            def update(self, **kwargs):
+                raise AssertionError("nothing left to add, should not be called")
+
+        repo._client.databases = _FakeDatabases()
+        repo.ensure_schema()
+        repo.ensure_schema()
+
+        self.assertEqual(len(retrieve_calls), 1)  # second call is a no-op
+
+
 class TestCreatePayload(unittest.TestCase):
     """pages.create 必須同時帶 properties / children / icon / cover。"""
 

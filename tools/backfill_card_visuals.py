@@ -36,6 +36,7 @@ from src.infrastructure.notion.retry_policy import retry_with_backoff  # noqa: E
 from src.infrastructure.notion.zettelkasten_card_repository import (  # noqa: E402
     _STAGE_PROPERTY,
     _STAGE_UNPROCESSED,
+    ZettelkastenCardRepository,
 )
 from zettelkasten_generator import (  # noqa: E402
     ZettelkastenCard,
@@ -85,15 +86,31 @@ def missing_stage(page: dict) -> bool:
     return not (prop.get("select") or {}).get("name")
 
 
-def needs_work(page: dict) -> bool:
-    return missing_cover(page) or missing_icon(page) or missing_stage(page)
+def needs_work(page: dict, write_stage: bool = True) -> bool:
+    """Whether this page still needs *some* update.
+
+    `write_stage` gates whether a missing 加工狀態 counts — when the 卡片盒 DB
+    doesn't have that column yet (e.g. a dry-run, or schema creation failed),
+    counting it here would make every card look pending even though
+    build_update() would have nothing to write for the stage part.
+    """
+    return (
+        missing_cover(page)
+        or missing_icon(page)
+        or (write_stage and missing_stage(page))
+    )
 
 
-def build_update(page: dict, icon: str) -> dict:
+def build_update(page: dict, icon: str, write_stage: bool = True) -> dict:
     """pages.update 的 kwargs —— 只包含這張卡真正缺的東西。
 
     空 icon 代表這批 Ollama 呼叫失敗；此時不寫 icon，讓下次重跑補上，
     而不是用規則值把它凍住。
+
+    `write_stage=False`（卡片盒 DB 還沒有「加工狀態」欄，見 run() 的
+    has_stage 檢查）時整個 properties key 都不送 —— 送了會被 Notion 拒收
+    整個 pages.update（400 validation_error），連同一次送出的 cover/icon
+    也會一起遺失。
     """
     update: Dict = {}
     if missing_cover(page):
@@ -103,7 +120,7 @@ def build_update(page: dict, icon: str) -> dict:
         }
     if icon and missing_icon(page):
         update["icon"] = {"type": "emoji", "emoji": icon}
-    if missing_stage(page):
+    if write_stage and missing_stage(page):
         update["properties"] = {
             _STAGE_PROPERTY: {"select": {"name": _STAGE_UNPROCESSED}}
         }
@@ -179,8 +196,31 @@ def run(dry_run: bool = False) -> Dict[str, int]:
     client = Client(auth=settings.notion_token)
     enhancer = ZettelkastenLLMEnhancer()
 
+    # 加工狀態 is new on this branch and is otherwise only created by
+    # ZettelkastenCardRepository._ensure_schema() during a main.py sync — this
+    # tool builds its own bare Client and never touches that path, so nothing
+    # creates the column here unless we do it explicitly. --dry-run must stay
+    # read-only (it's a preview), so only the real run creates the column;
+    # dry-run just reports whether it's there yet.
+    repo = ZettelkastenCardRepository(
+        token=settings.notion_token,
+        database_id=settings.notion_zettelkasten_database_id,
+        rate_limiter=limiter,
+        tag_categories=settings.zettelkasten_tag_categories,
+    )
+    if dry_run:
+        has_stage = repo.has_property(_STAGE_PROPERTY)
+        if not has_stage:
+            print(
+                f"（注意：卡片盒目前沒有「{_STAGE_PROPERTY}」欄位；"
+                f"正式執行時會自動建立，dry-run 不建欄、不預覽這部分的寫入）"
+            )
+    else:
+        repo.ensure_schema()
+        has_stage = repo.has_property(_STAGE_PROPERTY)
+
     pages = fetch_all_cards(client, settings.notion_zettelkasten_database_id, limiter)
-    pending = [p for p in pages if needs_work(p)]
+    pending = [p for p in pages if needs_work(p, has_stage)]
     stats = {"scanned": len(pages), "pending": len(pending), "updated": 0, "failed": 0}
     print(f"掃描 {len(pages)} 張卡片，其中 {len(pending)} 張需要補齊")
     if not pending:
@@ -194,7 +234,7 @@ def run(dry_run: bool = False) -> Dict[str, int]:
             if need_icon else ["" for _ in batch]
         )
         for page, icon in zip(batch, icons):
-            update = build_update(page, icon)
+            update = build_update(page, icon, has_stage)
             if not update:
                 continue
             title = card_title(page) or "?"
