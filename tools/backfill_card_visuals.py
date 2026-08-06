@@ -133,8 +133,14 @@ def icons_for(enhancer, pages: List[dict], categories: List[str]) -> List[str]:
     """為一批頁面挑 icon；整批 Ollama 失敗時回傳全空字串。
 
     只用「標題 + Key Word」組出臨時卡片 —— 兩者都在 query 回應裡，不必為了讀
-    內文再打一次 API。classify_cards 會覆寫 card.categories，所以事後還原成
-    Notion 上的真實分類，_fallback_icon 才會依真實分類遞補。
+    內文再打一次 API。
+
+    classify_cards 會覆寫 card.categories 成模型自己的解析結果（可能是幻覺），
+    而 _fallback_icon 又要靠 categories 決定遞補 —— 若照預設行為，classify_cards
+    回傳前就已經用「模型亂猜的分類」把 fallback icon 定案，事後才把 categories
+    換回 Notion 真實值也救不回來（icon 早就不是空字串，`icon or fallback` 永遠
+    短路）。所以這裡帶 apply_icon_fallback=False，只拿模型的原始 icon 挑選結果
+    （挑不到就是空字串），自己還原真實分類後才呼叫 _fallback_icon 遞補。
     """
     cards = [
         ZettelkastenCard(
@@ -151,7 +157,7 @@ def icons_for(enhancer, pages: List[dict], categories: List[str]) -> List[str]:
     ]
     original = [list(c.categories) for c in cards]
     try:
-        ok = enhancer.classify_cards(cards, categories)
+        ok = enhancer.classify_cards(cards, categories, apply_icon_fallback=False)
     except Exception as e:  # noqa: BLE001 — Ollama 掛掉不該中止整個回填
         logger.warning(f"Ollama 分類呼叫失敗，本批只補 cover: {e}")
         return ["" for _ in cards]
@@ -159,7 +165,7 @@ def icons_for(enhancer, pages: List[dict], categories: List[str]) -> List[str]:
         logger.warning("Ollama 回應無法解析，本批只補 cover（下次重跑會再試）")
         return ["" for _ in cards]
     for card, cats in zip(cards, original):
-        card.categories = cats  # 本工具不改 Tags，還原以免 fallback 用到亂猜的分類
+        card.categories = cats  # 換回 Notion 真實分類，fallback 才依真實資料判斷
     return [c.icon or ZettelkastenLLMEnhancer._fallback_icon(c) for c in cards]
 
 

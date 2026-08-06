@@ -779,7 +779,7 @@ class ZettelkastenLLMEnhancer:
 
     def classify_cards(
         self, cards: List[ZettelkastenCard], categories: List[str],
-        book_title: str = "",
+        book_title: str = "", *, apply_icon_fallback: bool = True,
     ) -> bool:
         """Assign fixed-category Tags + a page icon to each card in place.
 
@@ -794,7 +794,19 @@ class ZettelkastenLLMEnhancer:
 
         No-op returning False if there are no cards or no category list. On any
         Ollama failure the cards keep empty `categories`; `icon` still gets a
-        deterministic fallback so it is never blank.
+        deterministic fallback so it is never blank — unless the caller opts
+        out (see `apply_icon_fallback` below).
+
+        `apply_icon_fallback` (default True, matching every production caller):
+        when False, `card.icon` is left as the model's raw pick — empty string
+        if it didn't choose one — instead of being backfilled with
+        `_fallback_icon` here. This call also overwrites `card.categories`
+        with the model's own parse, which `_fallback_icon` reads from; a
+        caller that needs the fallback to reason about the card's *real*
+        categories (e.g. the visual backfill tool restoring the actual Notion
+        Tags right after this returns) must pass False and compute the
+        fallback itself afterward — otherwise the fallback baked in here
+        would already reflect the model's (possibly hallucinated) categories.
         """
         if not cards or not categories:
             return False
@@ -824,7 +836,7 @@ class ZettelkastenLLMEnhancer:
         for card, (cats, icon) in zip(cards, parsed):
             card.categories = cats
             # 先寫 categories，_fallback_icon 才吃得到分類預設
-            card.icon = icon or self._fallback_icon(card)
+            card.icon = icon if not apply_icon_fallback else (icon or self._fallback_icon(card))
             if cats:
                 assigned += 1
             if icon:
