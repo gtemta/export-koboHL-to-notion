@@ -262,6 +262,53 @@ class TestClassifyCards(unittest.TestCase):
         self.assertFalse(enhancer.classify_cards([card], [], "book"))
 
 
+class TestPaletteOverlapWarning(unittest.TestCase):
+    """Finding 3: the palette-disjointness invariant (_ICON_PALETTE vs
+    category emoji) is only test-enforced for DEFAULT_TAG_CATEGORIES. A
+    custom ZETTELKASTEN_TAG_CATEGORIES can violate it at runtime — e.g.
+    "🚀成長駭客" (🚀 is in _ICON_PALETTE) would make _pick_palette_emoji's
+    whole-remainder scan misread the category prefix as the model's icon
+    pick. classify_cards should at least warn once when that happens."""
+
+    def test_warns_when_configured_category_contains_a_palette_emoji(self):
+        card = _make_card("1")
+        overlapping = ["🚀成長駭客"]  # 🚀 is in _ICON_PALETTE
+        with patch(
+            "zettelkasten_generator._ollama_generate",
+            return_value="CARD_1：成長駭客｜🎯",
+        ), self.assertLogs("kobo_notion_sync", level="WARNING") as logs:
+            enhancer = ZettelkastenLLMEnhancer()
+            enhancer.classify_cards([card], overlapping, "book")
+        self.assertTrue(
+            any("🚀成長駭客" in msg for msg in logs.output),
+            logs.output,
+        )
+
+    def test_no_warning_for_default_categories(self):
+        card = _make_card("1")
+        with patch(
+            "zettelkasten_generator._ollama_generate",
+            return_value="CARD_1：心理學｜🎯",
+        ):
+            enhancer = ZettelkastenLLMEnhancer()
+            with self.assertRaises(AssertionError):
+                # DEFAULT_TAG_CATEGORIES is disjoint from the palette, so no
+                # warning should fire — assertLogs itself raises when the
+                # logger emits nothing at all, which is the expected outcome.
+                with self.assertLogs("kobo_notion_sync", level="WARNING"):
+                    enhancer.classify_cards([card], DEFAULT_TAG_CATEGORIES, "book")
+
+    def test_only_warns_once_per_category_set(self):
+        # distinct category text so this test doesn't depend on / interfere
+        # with the module-level "already warned" set used by other tests.
+        overlapping = ["🪐一次性測試分類"]
+        with self.assertLogs("kobo_notion_sync", level="WARNING"):
+            ZettelkastenLLMEnhancer._warn_if_categories_overlap_palette(overlapping)
+        with self.assertRaises(AssertionError):
+            with self.assertLogs("kobo_notion_sync", level="WARNING"):
+                ZettelkastenLLMEnhancer._warn_if_categories_overlap_palette(overlapping)
+
+
 class TestBookTitleMatching(unittest.TestCase):
     """E4: main-title extraction + normalization used for fuzzy Books-DB match."""
 

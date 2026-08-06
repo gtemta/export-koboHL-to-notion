@@ -224,6 +224,9 @@ _ICON_PALETTE = (
 )
 _ICON_PALETTE_SET = frozenset(_ICON_PALETTE)
 
+# 只在 process 內對同一組分類警告一次，避免每本書都重複洗版 log。
+_palette_overlap_warned: set = set()
+
 # 關鍵字 → icon。模型沒挑或挑了清單外的值時接手；值必須取自 _ICON_PALETTE。
 _ICON_KEYWORD_HINTS = (
     (("習慣", "循環", "重複", "迴圈"), "🔁"),
@@ -678,6 +681,32 @@ class ZettelkastenLLMEnhancer:
                 return ch
         return ""
 
+    @staticmethod
+    def _warn_if_categories_overlap_palette(categories: List[str]) -> None:
+        """The palette-disjointness invariant (see _ICON_PALETTE) is only
+        test-enforced for DEFAULT_TAG_CATEGORIES; a runtime override via
+        ZETTELKASTEN_TAG_CATEGORIES can violate it (e.g. "🚀成長駭客" puts a
+        palette emoji into the category text). When that happens,
+        _pick_palette_emoji's whole-remainder scan can misread the category
+        prefix as the model's icon pick, giving every card in that category
+        the same icon. Cheap fix: warn once per process instead of
+        restricting the scan (which would change already-well-tested parser
+        behaviour) — see Finding 3 in the card-visual-richness final review.
+        """
+        overlapping = [
+            c for c in categories if any(ch in _ICON_PALETTE_SET for ch in c)
+        ]
+        if not overlapping:
+            return
+        key = tuple(sorted(overlapping))
+        if key in _palette_overlap_warned:
+            return
+        _palette_overlap_warned.add(key)
+        logger.warning(
+            "分類清單包含調色盤 emoji，可能讓 icon 解析誤判整個分類前綴為模型的"
+            f"挑選結果（見 _ICON_PALETTE 不變條件）：{overlapping}"
+        )
+
     _ICON_SEPARATOR = re.compile(r'[｜|]')
 
     @classmethod
@@ -811,6 +840,8 @@ class ZettelkastenLLMEnhancer:
         if not cards or not categories:
             return False
 
+        self._warn_if_categories_overlap_palette(categories)
+
         prompt = self._build_classification_prompt(cards, categories)
         logger.info(
             f"Ollama classify request → model={self.model} cards={len(cards)} "
@@ -836,7 +867,7 @@ class ZettelkastenLLMEnhancer:
         for card, (cats, icon) in zip(cards, parsed):
             card.categories = cats
             # 先寫 categories，_fallback_icon 才吃得到分類預設
-            card.icon = icon if not apply_icon_fallback else (icon or self._fallback_icon(card))
+            card.icon = (icon or self._fallback_icon(card)) if apply_icon_fallback else icon
             if cats:
                 assigned += 1
             if icon:
