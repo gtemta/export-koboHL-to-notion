@@ -190,8 +190,10 @@ to the generator, persists the batch via `CardStore`, then uploads through
 - **章名消毒**：`_clean_chapter_reference(raw, *, from_toc)` 在**建卡當下**套用於兩個
   `chapter_reference=` 賦值點，讓 `cards_output/*.json` 落地的就是可信值（不在 Notion
   層 render 時才清——那樣 JSON 會留髒值，續傳與未來取材都會吃到）。
-  `from_toc` 由 `GenerateBookCardsUseCase._to_dict()` 從 `Highlight.toc_chapter is not None`
-  帶入，**缺鍵預設 False**（legacy 入口走保守路線）。污染唯一來源是
+  `from_toc` 由 `GenerateBookCardsUseCase._to_dict()` 從
+  `bool(Highlight.toc_chapter or Highlight.toc_section)` 帶入（非單純 `is not None`——
+  TOC 條目標題可能是空字串，此時目錄沒給到真實章名，落回不信任），**缺鍵預設
+  False**（legacy 入口走保守路線）。污染唯一來源是
   `chapter_title_heuristics.extract_real_chapter_title()`——它拿劃線正文猜章名、容忍到
   150 字；該檔案刻意未收緊，收緊它會連帶改變無 TOC 書籍的劃線頁分章。
 - 章名被清成空字串時，📖 callout 仍會保留閱讀進度（守門條件是

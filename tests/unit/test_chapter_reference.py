@@ -55,6 +55,12 @@ class TestCleanChapterReference(unittest.TestCase):
         self.assertEqual(_clean_chapter_reference("Unknown", from_toc=True), "")
         self.assertEqual(_clean_chapter_reference("Unknown", from_toc=False), "")
 
+    def test_traditional_unknown_chapter_sentinel_is_dropped(self):
+        # kobo_sqlite_repository._initial_chapter_name 找不到任何章名信號時
+        # 回傳的哨兵值，同樣不是真實章名，來自哪條路徑都該清掉。
+        self.assertEqual(_clean_chapter_reference("未知章節", from_toc=True), "")
+        self.assertEqual(_clean_chapter_reference("未知章節", from_toc=False), "")
+
     def test_empty_and_none_are_dropped(self):
         self.assertEqual(_clean_chapter_reference("", from_toc=True), "")
         self.assertEqual(_clean_chapter_reference(None, from_toc=False), "")
@@ -149,10 +155,17 @@ class TestHighlightDictCarriesTocFlag(unittest.TestCase):
         h = self._highlight(toc_chapter=None)
         self.assertFalse(GenerateBookCardsUseCase._to_dict(h)["chapter_from_toc"])
 
+    def test_empty_toc_title_is_marked_untrusted(self):
+        # TocChapterResolver 對空白標題的 TOC 條目仍會回傳非 None 的 toc_chapter
+        # （title=(title or "").strip() 可能是空字串），但空字串代表章名其實是
+        # _initial_chapter_name 猜的，不是目錄給的，不該被信任。
+        h = self._highlight(toc_chapter="", toc_section=None)
+        self.assertFalse(GenerateBookCardsUseCase._to_dict(h)["chapter_from_toc"])
+
 
 def _repo():
     repo = ZettelkastenCardRepository(token="dummy", database_id="db")
-    repo._schema_props = None  # 預先塞快取，避免任何網路呼叫
+    repo._schema_props = None  # 跳過 schema 抓取；照舊寫入全部屬性
     return repo
 
 

@@ -26,6 +26,10 @@ class TestClaimStyleTitleRule(unittest.TestCase):
         self.assertIn("論斷", prompt)
         self.assertIn("5-20", prompt)
         self.assertNotIn("5-15", prompt)
+        # main.py 實際跑的是這條路徑（批次），這個 fallback 子句是審核關卡能
+        # 維持不動的唯一原因：原文沒論斷時不准模型自行腦補結論。掉了這條，
+        # correctness 面向的退卡率會悄悄升高，卻不會有任何紅燈。
+        self.assertIn("不要自行推論出原文沒有的結論", prompt)
 
     def test_review_prompt_is_untouched(self):
         # 標題風格不進審核關卡：不放寬 correctness，也不加嚴 consistency。
@@ -36,6 +40,9 @@ class TestClaimStyleTitleRule(unittest.TestCase):
         prompt = CardReviewer()._build_review_prompt(card, "書名", "", [])
         self.assertNotIn("論斷", prompt)
         self.assertNotIn("主張句", prompt)
+        # 正面釘住 K1 fallback 子句共存的那條軸線（correctness 面向），
+        # 避免只斷言「沒有」讓不同措辭的標題規則悄悄溜進來也算過關。
+        self.assertIn("沒有加入原文沒說的因果、數據或結論", prompt)
 
 
 if __name__ == "__main__":

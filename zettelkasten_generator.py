@@ -144,7 +144,10 @@ def _ollama_generate(
 # 當成章名印在卡片的 📖 callout 上。TOC 來源的章名是 Kobo 目錄的真實標題，不做任何判斷。
 _CHAPTER_JUNK_CHARS = ('」', '「', '⋯', '。')
 _CHAPTER_MAX_LEN = 25
-_CHAPTER_UNKNOWN = 'Unknown'
+# 三個哨兵值分別來自：兩處 highlight.get('chapter_name', 'Unknown') 的預設值、
+# kobo_sqlite_repository._initial_chapter_name 找不到任何章名信號時的回傳值、
+# legacy/DBReader.py 的簡體版本（legacy 匯出路徑仍可能產生）。
+_CHAPTER_UNKNOWN = ('Unknown', '未知章節', '未知章节')
 
 
 def _clean_chapter_reference(raw: Optional[str], *, from_toc: bool) -> str:
@@ -154,7 +157,7 @@ def _clean_chapter_reference(raw: Optional[str], *, from_toc: bool) -> str:
     一律照留。其餘都是猜的，才套長度與標點的審查規則。
     """
     text = (raw or '').strip()
-    if not text or text == _CHAPTER_UNKNOWN:
+    if not text or text in _CHAPTER_UNKNOWN:
         return ''
     if from_toc:
         return text
