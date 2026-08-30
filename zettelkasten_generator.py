@@ -139,6 +139,31 @@ def _ollama_generate(
         return _partial()
 
 
+# 章節參照消毒（K4）。污染唯一來源是 chapter_title_heuristics.extract_real_chapter_title()
+# ——它拿劃線正文去猜章名、容忍到 150 字，只要含「：」就給 3 分信心，於是整段內文會被
+# 當成章名印在卡片的 📖 callout 上。TOC 來源的章名是 Kobo 目錄的真實標題，不做任何判斷。
+_CHAPTER_JUNK_CHARS = ('」', '「', '⋯', '。')
+_CHAPTER_MAX_LEN = 25
+_CHAPTER_UNKNOWN = 'Unknown'
+
+
+def _clean_chapter_reference(raw: Optional[str], *, from_toc: bool) -> str:
+    """回傳可信的章節標籤；判定為劃線內文時回空字串。
+
+    `from_toc=True` 代表章名來自 Kobo 目錄（`Highlight.toc_chapter` 非 None），
+    一律照留。其餘都是猜的，才套長度與標點的審查規則。
+    """
+    text = (raw or '').strip()
+    if not text or text == _CHAPTER_UNKNOWN:
+        return ''
+    if from_toc:
+        return text
+    if len(text) > _CHAPTER_MAX_LEN or any(c in text for c in _CHAPTER_JUNK_CHARS):
+        logger.debug(f"章節參照疑似劃線內文，已捨棄：{text[:30]}")
+        return ''
+    return text
+
+
 @dataclass
 class ZettelkastenCard:
     """Represents a single Zettelkasten note card"""
