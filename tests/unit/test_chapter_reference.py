@@ -7,7 +7,12 @@ from unittest.mock import patch
 
 from src.application.use_cases.generate_book_cards_use_case import GenerateBookCardsUseCase
 from src.domain.entities.highlight import Highlight
-from zettelkasten_generator import ZettelkastenLLMEnhancer, _clean_chapter_reference
+from src.infrastructure.notion.zettelkasten_card_repository import ZettelkastenCardRepository
+from zettelkasten_generator import (
+    ZettelkastenCard,
+    ZettelkastenLLMEnhancer,
+    _clean_chapter_reference,
+)
 
 _POLLUTED = (
     "拮抗理論」：「任何長時間或反覆從享樂或情感中性狀態脫離的情況⋯⋯"
@@ -143,6 +148,52 @@ class TestHighlightDictCarriesTocFlag(unittest.TestCase):
     def test_guessed_highlight_is_marked_untrusted(self):
         h = self._highlight(toc_chapter=None)
         self.assertFalse(GenerateBookCardsUseCase._to_dict(h)["chapter_from_toc"])
+
+
+def _repo():
+    repo = ZettelkastenCardRepository(token="dummy", database_id="db")
+    repo._schema_props = None  # 預先塞快取，避免任何網路呼叫
+    return repo
+
+
+def _card(**overrides):
+    kwargs = dict(
+        id="id", title="標題", content="內容", source_highlight="劃線",
+        chapter_reference="", chapter_progress=0.0,
+    )
+    kwargs.update(overrides)
+    return ZettelkastenCard(**kwargs)
+
+
+class TestChapterCalloutFallsBackToProgress(unittest.TestCase):
+    """進度是 Kobo 硬數據，不該被章名的問題連坐。"""
+
+    @staticmethod
+    def _callouts(blocks):
+        return [b for b in blocks if b["type"] == "callout"
+                and b["callout"]["icon"]["emoji"] == "📖"]
+
+    def test_progress_only_callout_when_chapter_was_dropped(self):
+        blocks = _repo()._build_children(_card(chapter_reference="", chapter_progress=0.42))
+        callouts = self._callouts(blocks)
+        self.assertEqual(len(callouts), 1)
+        self.assertEqual(
+            callouts[0]["callout"]["rich_text"][0]["text"]["content"],
+            "（進度 42%）",
+        )
+
+    def test_no_callout_when_both_chapter_and_progress_are_empty(self):
+        blocks = _repo()._build_children(_card(chapter_reference="", chapter_progress=0.0))
+        self.assertEqual(self._callouts(blocks), [])
+
+    def test_chapter_and_progress_together_unchanged(self):
+        blocks = _repo()._build_children(
+            _card(chapter_reference="第一章", chapter_progress=0.42)
+        )
+        self.assertEqual(
+            self._callouts(blocks)[0]["callout"]["rich_text"][0]["text"]["content"],
+            "第一章（進度 42%）",
+        )
 
 
 if __name__ == "__main__":
