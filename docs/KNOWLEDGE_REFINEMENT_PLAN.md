@@ -23,7 +23,12 @@
   R1（`_ollama_generate` 抽取）、R2（移除 7 處假分數）照做；
   **R3 重審 CLI 取消**——Notion 不再顯示分數，重審舊卡沒有地方可寫。
   Gemini 後端整個刪除（從未跑過、與四維審核契約不相容）。
-- ⬜ Phase 4：知識抽取精練（K1 主張式標題 / K2 延伸段 / K3 註記上卡 / K4 章節消毒）
+- 🟡 Phase 4：知識抽取精練 — K1（主張式標題）、K4（章節消毒）完成 2026-08-30，
+  見 `docs/superpowers/specs/2026-08-30-card-claim-titles-and-chapter-sanitization-design.md`。
+  K1 採「忠於原文優先」：prompt 要主張句，但原文只是定義／描述時寫概念陳述句，
+  **審核 prompt 一字未動**。K4 採來源分流：`Highlight.toc_chapter` 非 None 的章名照留，
+  heuristic 猜的才套長度／標點審查；**未動 `chapter_title_heuristics.py` 源頭**。
+  ⬜ K2（延伸段）、K3（註記上卡）仍未做。
 - ⬜ Phase 5：既有卡完整回填（backfill 工具）
 - ⬜ Phase 6：分享貼文投影層（P1 金句卡 / P2 讀畢書摘 / P3 跨書主題串）
 
