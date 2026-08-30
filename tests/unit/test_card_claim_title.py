@@ -1,0 +1,42 @@
+"""K1：產卡 prompt 要主張句，審核 prompt 不動。
+
+斷言刻意只抓規則的關鍵字與長度數字——prompt 文案會微調，但「要求主張句」
+與「5-20 字」這兩件事若消失就是回歸。
+"""
+import unittest
+
+from zettelkasten_generator import CardReviewer, ZettelkastenCard, ZettelkastenLLMEnhancer
+
+
+class TestClaimStyleTitleRule(unittest.TestCase):
+    def test_single_card_prompt_asks_for_a_claim(self):
+        prompt = ZettelkastenLLMEnhancer()._build_prompt("劃線文字", "書名")
+        self.assertIn("論斷", prompt)
+        self.assertIn("5-20", prompt)
+        self.assertNotIn("5-15", prompt)
+
+    def test_single_card_prompt_forbids_inventing_conclusions(self):
+        # 與審核 correctness 面向共存的接縫：原文沒論斷時不得自行推論。
+        prompt = ZettelkastenLLMEnhancer()._build_prompt("劃線文字", "書名")
+        self.assertIn("不要自行推論出原文沒有的結論", prompt)
+
+    def test_batch_prompt_asks_for_a_claim(self):
+        highlights = [{"text": "劃線一"}, {"text": "劃線二"}]
+        prompt = ZettelkastenLLMEnhancer()._build_batch_prompt(highlights, "書名")
+        self.assertIn("論斷", prompt)
+        self.assertIn("5-20", prompt)
+        self.assertNotIn("5-15", prompt)
+
+    def test_review_prompt_is_untouched(self):
+        # 標題風格不進審核關卡：不放寬 correctness，也不加嚴 consistency。
+        card = ZettelkastenCard(
+            id="id", title="標題", content="內容",
+            source_highlight="劃線", chapter_reference="", chapter_progress=0.0,
+        )
+        prompt = CardReviewer()._build_review_prompt(card, "書名", "", [])
+        self.assertNotIn("論斷", prompt)
+        self.assertNotIn("主張句", prompt)
+
+
+if __name__ == "__main__":
+    unittest.main()

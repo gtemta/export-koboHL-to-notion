@@ -443,7 +443,7 @@ class ZettelkastenLLMEnhancer:
         Generate a Zettelkasten card from a highlight using Ollama.
 
         Returns a ZettelkastenCard with:
-        - Title: 5-15 characters summarizing the core concept
+        - Title: a 5-20 character claim the card can stand on
         - Content: 100-150 characters atomic note in own words
 
         `book_theme` and `revision_hint` are optional context used when the
@@ -519,12 +519,14 @@ class ZettelkastenLLMEnhancer:
 {highlight_text}
 {annotation_context}{theme_context}{revision_context}
 請生成卡片筆記，格式如下：
-【標題】5-15個字，概括這段話的核心概念
+【標題】5-20個字，寫成一句可以獨立成立的論斷，讓人不看內容也知道這張卡主張什麼
+（✅「語言愈先進，謊言愈精美」／❌「語言的進化與欺騙藝術的關係」）
+若原文只是定義或描述、本身沒有論斷，就寫成精準的概念陳述句，不要自行推論出原文沒有的結論
 【內容】100-150個字，用你自己的話重新闡述這個觀點的關鍵洞見，要確保這是一個完整、獨立的原子筆記
 【標籤】2-3個概念標籤，用頓號分隔（例如：習慣、複利、系統思考），方便日後跨書用概念瀏覽
 
 注意事項：
-1. 標題要精準、簡潔，能讓人一眼看出核心概念
+1. 標題要精準、簡潔，能讓人一眼看出這張卡主張什麼
 2. 內容要用自己的話重述，不要直接複製原文
 3. 內容要包含原文的關鍵洞見，但要更精煉
 4. 使用繁體中文，符合台灣用語習慣
@@ -925,7 +927,7 @@ class ZettelkastenLLMEnhancer:
         format_lines = []
         for i in range(1, n + 1):
             format_lines.append(
-                f"### CARD_{i}\n【標題】5-15個字...\n【內容】100-150個字...\n"
+                f"### CARD_{i}\n【標題】5-20個字的論斷句...\n【內容】100-150個字...\n"
                 f"【標籤】2-3個概念標籤，用頓號分隔"
             )
         format_example = "\n".join(format_lines)
@@ -943,7 +945,9 @@ class ZettelkastenLLMEnhancer:
 2. 內容要用自己的話重述，不要照抄原文
 3. {n} 張卡都要給，不可省略、不可合併
 4. 分隔符只用 ### CARD_編號，不要加其他註解、結語或總結
-5. 標題 5-15 個字，內容 100-150 個字
+5. 標題 5-20 個字，要寫成一句可以獨立成立的論斷，讓人不看內容也知道這張卡主張什麼
+   （✅「語言愈先進，謊言愈精美」／❌「語言的進化與欺騙藝術的關係」）；若原文只是定義
+   或描述、本身沒有論斷，就寫成精準的概念陳述句，不要自行推論出原文沒有的結論。內容 100-150 個字
 6. 【標籤】之間只能用頓號（、）分隔，每個標籤 2-6 個字。絕對不要用冒號、破折號、
    中點或句號把標籤串在一起（❌「語言演化：社交結構」❌「習慣-複利」✅「習慣、複利」）
 
