@@ -3,8 +3,11 @@
 污染樣本取自 docs/KNOWLEDGE_REFINEMENT_PLAN.md「關鍵事實」#4 的真實輸出。
 """
 import unittest
+from unittest.mock import patch
 
-from zettelkasten_generator import _clean_chapter_reference
+from src.application.use_cases.generate_book_cards_use_case import GenerateBookCardsUseCase
+from src.domain.entities.highlight import Highlight
+from zettelkasten_generator import ZettelkastenLLMEnhancer, _clean_chapter_reference
 
 _POLLUTED = (
     "拮抗理論」：「任何長時間或反覆從享樂或情感中性狀態脫離的情況⋯⋯"
@@ -53,6 +56,93 @@ class TestCleanChapterReference(unittest.TestCase):
 
     def test_surrounding_whitespace_is_stripped(self):
         self.assertEqual(_clean_chapter_reference("  第一章  ", from_toc=False), "第一章")
+
+
+_BATCH_RESPONSE = (
+    "### CARD_1\n"
+    "【標題】延遲滿足會反過來擴大痛苦\n"
+    "【內容】" + "內" * 100 + "\n"
+    "【標籤】習慣、複利\n"
+)
+
+
+class TestCardConstructionSanitisesChapter(unittest.TestCase):
+    """建卡當下就清乾淨，讓 cards_output/*.json 落地的就是可信值。"""
+
+    def test_batch_parse_drops_polluted_chapter(self):
+        highlights = [{
+            "text": "原始劃線",
+            "chapter_name": _POLLUTED,
+            "chapter_progress": 0.42,
+        }]
+        cards = ZettelkastenLLMEnhancer()._parse_batch_response(
+            _BATCH_RESPONSE, highlights
+        )
+        self.assertEqual(cards[0].chapter_reference, "")
+        # 進度是 Kobo 硬數據，不受章名判定影響
+        self.assertEqual(cards[0].chapter_progress, 0.42)
+
+    def test_batch_parse_keeps_toc_chapter(self):
+        label = "第三章 建立讓好習慣自動發生的系統 › 讓提示顯而易見的環境設計"
+        highlights = [{
+            "text": "原始劃線",
+            "chapter_name": label,
+            "chapter_progress": 0.42,
+            "chapter_from_toc": True,
+        }]
+        cards = ZettelkastenLLMEnhancer()._parse_batch_response(
+            _BATCH_RESPONSE, highlights
+        )
+        self.assertEqual(cards[0].chapter_reference, label)
+
+    def test_generate_card_drops_polluted_chapter(self):
+        highlight = {
+            "text": "原始劃線",
+            "chapter_name": _POLLUTED,
+            "chapter_progress": 0.42,
+        }
+        single_response = (
+            "【標題】延遲滿足會反過來擴大痛苦\n"
+            "【內容】" + "內" * 100 + "\n"
+            "【標籤】習慣、複利\n"
+        )
+        with patch(
+            "zettelkasten_generator._ollama_generate",
+            return_value=single_response,
+        ):
+            card = ZettelkastenLLMEnhancer().generate_card(highlight, "書名")
+        self.assertEqual(card.chapter_reference, "")
+
+    def test_unknown_default_never_reaches_the_card(self):
+        # highlight dict 沒有 chapter_name → 兩處建卡點的 .get 預設值 'Unknown'
+        highlights = [{"text": "原始劃線", "chapter_progress": 0.0}]
+        cards = ZettelkastenLLMEnhancer()._parse_batch_response(
+            _BATCH_RESPONSE, highlights
+        )
+        self.assertEqual(cards[0].chapter_reference, "")
+
+
+class TestHighlightDictCarriesTocFlag(unittest.TestCase):
+    """可信度訊號的唯一來源：Highlight.toc_chapter 非 None ⟺ 章名來自 Kobo 目錄。"""
+
+    @staticmethod
+    def _highlight(**overrides):
+        kwargs = dict(
+            text="劃線內容",
+            chapter_name="第一章",
+            chapter_progress=0.5,
+            content_id="cid",
+        )
+        kwargs.update(overrides)
+        return Highlight(**kwargs)
+
+    def test_toc_backed_highlight_is_marked_trusted(self):
+        h = self._highlight(toc_chapter="第一章", toc_section="小節")
+        self.assertTrue(GenerateBookCardsUseCase._to_dict(h)["chapter_from_toc"])
+
+    def test_guessed_highlight_is_marked_untrusted(self):
+        h = self._highlight(toc_chapter=None)
+        self.assertFalse(GenerateBookCardsUseCase._to_dict(h)["chapter_from_toc"])
 
 
 if __name__ == "__main__":

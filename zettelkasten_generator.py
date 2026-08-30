@@ -450,7 +450,10 @@ class ZettelkastenLLMEnhancer:
         review gate sends a rejected card back for a second attempt.
         """
         text = highlight.get('text', '').strip()
-        chapter = highlight.get('chapter_name', 'Unknown')
+        chapter = _clean_chapter_reference(
+            highlight.get('chapter_name', 'Unknown'),
+            from_toc=bool(highlight.get('chapter_from_toc', False)),
+        )
         progress = highlight.get('chapter_progress', 0.0)
         annotation = (highlight.get('annotation') or '').strip()
 
@@ -981,7 +984,10 @@ class ZettelkastenLLMEnhancer:
             if not title or not content:
                 logger.warning(f"Batch parse: CARD_{i} missing title or content")
                 continue
-            chapter = highlight.get('chapter_name', 'Unknown')
+            chapter = _clean_chapter_reference(
+                highlight.get('chapter_name', 'Unknown'),
+                from_toc=bool(highlight.get('chapter_from_toc', False)),
+            )
             progress = highlight.get('chapter_progress', 0.0) or 0.0
             card_id = f"card_{datetime.now().strftime('%Y%m%d%H%M%S')}_{i:02d}_{hash(original) % 10000:04d}"
             results[i - 1] = ZettelkastenCard(
