@@ -66,13 +66,16 @@ def _clean_chapter_reference(raw: str, *, from_toc: bool) -> str
 
 判斷順序：
 
-1. `raw` 去空白後為空、或等於 `'Unknown'` → 回 `''`
+1. `raw` 去空白後為空、或等於 `'Unknown'` → 回 `''`。**這一步不看 `from_toc`**——
+   `'Unknown'` 是兩處 `highlight.get('chapter_name', 'Unknown')` 的哨兵預設值，
+   不是任何真實章名，來自哪裡都該清掉。
 2. `from_toc=True` → 原樣回傳（Kobo 目錄的真實標題，不做任何內容判斷）
-3. 長度 > 25 字 → 回 `''`
+3. 長度 > 25 字（以字元計）→ 回 `''`
 4. 含 `」`、`「`、`⋯`、`。` 任一 → 回 `''`
 5. 其餘原樣回傳
 
-清成空字串時 log 一則 **DEBUG**（帶原值前 30 字）。不用 WARNING——無 TOC 的書會刷版。
+**只有第 3、4 步**（真正判定為污染）log 一則 **DEBUG**（帶原值前 30 字），
+第 1 步的空值／哨兵不 log。不用 WARNING——無 TOC 的書會刷版。
 
 ### 套用點
 
