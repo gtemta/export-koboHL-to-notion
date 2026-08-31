@@ -151,6 +151,7 @@ class ZettelkastenCard:
     source_bookmark_id: str = ""      # Kobo BookmarkID of the source highlight
     tags: List[str] = field(default_factory=list)  # Free concept tags (2-3) → Key Word
     categories: List[str] = field(default_factory=list)  # Fixed Tags classification (1-2)
+    icon: str = ""                    # Notion page icon emoji (from _ICON_PALETTE)
     # --- review gate (local only; never written to Notion) ---
     review_status: str = "pending"    # pending / passed / rejected
     review_scores: Dict[str, int] = field(default_factory=dict)  # 四維 1-5
@@ -171,6 +172,7 @@ class ZettelkastenCard:
             'source_bookmark_id': self.source_bookmark_id,
             'tags': self.tags,
             'categories': self.categories,
+            'icon': self.icon,
             'review_status': self.review_status,
             'review_scores': self.review_scores,
             'review_notes': self.review_notes,
@@ -197,6 +199,7 @@ class ZettelkastenCard:
             source_bookmark_id=d.get('source_bookmark_id', '') or '',
             tags=list(d.get('tags') or []),
             categories=list(d.get('categories') or []),
+            icon=d.get('icon', '') or '',
             review_status=d.get('review_status', 'pending') or 'pending',
             review_scores=dict(d.get('review_scores') or {}),
             review_notes=d.get('review_notes', '') or '',
@@ -204,6 +207,55 @@ class ZettelkastenCard:
             regenerated=bool(d.get('regenerated', False)),
             created_at=created_at,
         )
+
+
+# ----- page icon 調色盤 -----
+# 兩條不變條件（有測試把關，見 tests/unit/test_card_icons.py）：
+#   1. 每個元素恰為 1 個 codepoint，不含 ZWJ / variation selector / 膚色修飾符
+#      —— 多碼點序列是 Notion icon 最常見的拒收原因，會讓整張卡建立失敗。
+#   2. 與分類自帶的 emoji 零交集 —— parser 靠「行內出現的調色盤 emoji 必為
+#      模型挑的 icon」判讀，兩者相交這條規則就只是機率上成立。
+# 讓模型「從清單裡挑」而非自由生成，因此不需要任何 codepoint 驗證邏輯。
+_ICON_PALETTE = (
+    "🧭", "🪞", "🎯", "🔑", "🧪", "🌱", "🔁", "🪜", "🧱", "🔍",
+    "💡", "🧨", "🚧", "🪤", "🎭", "🧊", "🔥", "🌊", "🌉", "🚀",
+    "🧬", "🦴", "🩺", "🪐", "📉", "🧯", "🪺", "🫧", "🪃", "🧲",
+    "🪢", "🌀", "🍀", "🐘", "🦉", "🐜", "🌗", "🧵", "🪟", "🚪",
+)
+_ICON_PALETTE_SET = frozenset(_ICON_PALETTE)
+
+# 只在 process 內對同一組分類警告一次，避免每本書都重複洗版 log。
+_palette_overlap_warned: set = set()
+
+# 關鍵字 → icon。模型沒挑或挑了清單外的值時接手；值必須取自 _ICON_PALETTE。
+_ICON_KEYWORD_HINTS = (
+    (("習慣", "循環", "重複", "迴圈"), "🔁"),
+    (("風險", "陷阱", "偏誤", "謬誤"), "🪤"),
+    (("方向", "選擇", "決策", "策略"), "🧭"),
+    (("時間", "階段", "週期"), "🌗"),
+    (("學習", "練習", "記憶"), "🧪"),
+    (("關係", "連結", "網絡"), "🪢"),
+    (("成長", "起點", "萌芽"), "🌱"),
+    (("情緒", "動機", "慾望"), "🔥"),
+    (("溝通", "表達", "敘事"), "🎭"),
+    (("金錢", "投資", "資產", "成本"), "🧯"),
+    (("結構", "系統", "框架"), "🧱"),
+    (("觀察", "洞察", "發現"), "🔍"),
+)
+
+# 分類 text core → 預設 icon（同樣取自 _ICON_PALETTE，且刻意不用分類自帶的 emoji）。
+_CATEGORY_ICON_DEFAULTS = {
+    "心理學": "🪺",
+    "學習技巧": "🧪",
+    "商務": "🪐",
+    "人生觀點": "🧭",
+    "邏輯思考": "🪢",
+    "哲學科學": "🧬",
+    "軟體工程": "🧱",
+    "行銷": "🎯",
+    "專案管理": "🪜",
+    "理財投資": "🧯",
+}
 
 
 class CardSelectionAlgorithm:
@@ -600,20 +652,76 @@ class ZettelkastenLLMEnhancer:
         )
 
     @classmethod
-    def _parse_classification(
-        cls, text: str, n: int, allowed: List[str]
-    ) -> List[List[str]]:
-        """Parse `CARD_i: 分類A、分類B` lines into per-card category lists.
+    def _fallback_icon(cls, card: 'ZettelkastenCard') -> str:
+        """模型沒給 icon（或給了清單外的值）時的決定性遞補。
 
-        Category names are matched on their text core (emoji-insensitive) and
-        written back as the canonical `allowed` value, so Notion multi_select
-        options keep their emoji prefix. At most 2 per card; cards with no
-        valid category get []. Pure — no Ollama, unit-testable.
+        扛「同一本書的卡彼此可辨」的是 icon，而 icon 來自本地小模型，
+        所以這不是裝飾而是保底 —— 保證 icon 永不空白。
         """
-        result: List[List[str]] = [[] for _ in range(n)]
-        if not text or not allowed:
-            return result
-        canonical = {cls._category_core(a): a for a in allowed if cls._category_core(a)}
+        haystack = "".join(card.tags or []) + (card.title or "")
+        for keywords, emoji in _ICON_KEYWORD_HINTS:
+            if any(k in haystack for k in keywords):
+                return emoji
+        for category in card.categories or []:
+            emoji = _CATEGORY_ICON_DEFAULTS.get(cls._category_core(category))
+            if emoji:
+                return emoji
+        return _ICON_PALETTE[0]
+
+    @classmethod
+    def _pick_palette_emoji(cls, text: str) -> str:
+        """文字中第一個落在 _ICON_PALETTE 的 emoji，沒有則回空字串。
+
+        因為調色盤與分類自帶的 emoji 零交集，且 prompt 給模型的分類名已去 emoji，
+        所以行內出現的調色盤 emoji 必為模型挑的 icon —— 可以放心掃整行，
+        不必依賴模型有沒有照 `｜` 格式輸出。
+        """
+        for ch in text or "":
+            if ch in _ICON_PALETTE_SET:
+                return ch
+        return ""
+
+    @staticmethod
+    def _warn_if_categories_overlap_palette(categories: List[str]) -> None:
+        """The palette-disjointness invariant (see _ICON_PALETTE) is only
+        test-enforced for DEFAULT_TAG_CATEGORIES; a runtime override via
+        ZETTELKASTEN_TAG_CATEGORIES can violate it (e.g. "🚀成長駭客" puts a
+        palette emoji into the category text). When that happens,
+        _pick_palette_emoji's whole-remainder scan can misread the category
+        prefix as the model's icon pick, giving every card in that category
+        the same icon. Cheap fix: warn once per process instead of
+        restricting the scan (which would change already-well-tested parser
+        behaviour) — see Finding 3 in the card-visual-richness final review.
+        """
+        overlapping = [
+            c for c in categories if any(ch in _ICON_PALETTE_SET for ch in c)
+        ]
+        if not overlapping:
+            return
+        key = tuple(sorted(overlapping))
+        if key in _palette_overlap_warned:
+            return
+        _palette_overlap_warned.add(key)
+        logger.warning(
+            "分類清單包含調色盤 emoji，可能讓 icon 解析誤判整個分類前綴為模型的"
+            f"挑選結果（見 _ICON_PALETTE 不變條件）：{overlapping}"
+        )
+
+    _ICON_SEPARATOR = re.compile(r'[｜|]')
+
+    @classmethod
+    def _iter_matched_card_lines(cls, text: str, n: int):
+        """Yield `(idx, remainder)` for each `CARD_i:` line whose index is in
+        `1..n`, regardless of what (if anything) it goes on to contain.
+
+        Shared by `_parse_classification` (which extracts categories/icon from
+        `remainder`) and `classify_cards` (which only needs to know whether the
+        raw response matched the expected format at all — see
+        `_response_has_card_lines`). Keeping the line-matching logic in one
+        place means the two can't drift apart on what counts as "matched".
+        """
+        if not text:
+            return
         cleaned = cls._strip_thinking(text)
         for line in cleaned.splitlines():
             m = cls._CLASSIFY_LINE.search(line)
@@ -623,16 +731,48 @@ class ZettelkastenLLMEnhancer:
                 idx = int(m.group(1))
             except ValueError:
                 continue
-            if not (1 <= idx <= n):
-                continue
+            if 1 <= idx <= n:
+                yield idx, m.group(2).strip()
+
+    @classmethod
+    def _response_has_card_lines(cls, text: str, n: int) -> bool:
+        """Whether the raw response contains at least one recognizable
+        `CARD_i:` line — i.e. whether it was parseable at all, independent of
+        whether any card actually got a usable category or icon out of it.
+
+        `classify_cards` returns this (not "did anything get extracted") so
+        callers can tell a well-formed response where the model legitimately
+        picked nothing usable apart from a genuinely unparseable/empty one.
+        """
+        return any(True for _ in cls._iter_matched_card_lines(text, n))
+
+    @classmethod
+    def _parse_classification(
+        cls, text: str, n: int, allowed: List[str]
+    ) -> List[Tuple[List[str], str]]:
+        """Parse `CARD_i: 分類A、分類B｜emoji` lines into per-card (categories, icon).
+
+        Category names are matched on their text core (emoji-insensitive) and
+        written back as the canonical `allowed` value, so Notion multi_select
+        options keep their emoji prefix. At most 2 categories per card; the icon
+        is `""` when the model gave none or gave one outside the palette.
+        Pure — no Ollama, unit-testable.
+        """
+        result: List[Tuple[List[str], str]] = [([], "") for _ in range(n)]
+        if not text or not allowed:
+            return result
+        canonical = {cls._category_core(a): a for a in allowed if cls._category_core(a)}
+        for idx, remainder in cls._iter_matched_card_lines(text, n):
+            # 分類只看 ｜ 之前，icon 掃整行（模型常常不照格式）
+            category_part = cls._ICON_SEPARATOR.split(remainder, maxsplit=1)[0]
             picked: List[str] = []
-            for part in cls._CLASSIFY_SPLIT.split(m.group(2).strip()):
+            for part in cls._CLASSIFY_SPLIT.split(category_part.strip()):
                 name = canonical.get(cls._category_core(part))
                 if name and name not in picked:
                     picked.append(name)
                 if len(picked) >= 2:
                     break
-            result[idx - 1] = picked
+            result[idx - 1] = (picked, cls._pick_palette_emoji(remainder))
         return result
 
     def _build_classification_prompt(
@@ -645,33 +785,62 @@ class ZettelkastenLLMEnhancer:
         for i, c in enumerate(cards, start=1):
             card_blocks.append(f"CARD_{i}：{c.title}｜{c.content}")
         cards_section = "\n".join(card_blocks)
-        return f"""你是一位知識分類助理。以下是 {len(cards)} 張卡片筆記，請為每張卡片挑選最貼切的分類。
+        icons = " ".join(_ICON_PALETTE)
+        return f"""你是一位知識分類助理。以下是 {len(cards)} 張卡片筆記，請為每張卡片挑選最貼切的分類與一個代表 emoji。
 
 可用分類（只能從這裡挑，不可自創）：
 {allowed}
+
+可用 emoji（只能從這裡挑，不可自創）：
+{icons}
 
 卡片：
 {cards_section}
 
 規則：
 1. 每張卡片挑 1-2 個最貼切的分類，只能從上面清單挑，用頓號（、）分隔
-2. 如果沒有任何分類貼切，該卡片留空（不要硬塞、不要發明新分類）
-3. 嚴格依照格式逐行輸出，每張卡片一行：CARD_編號：分類
-4. 不要加任何解釋或結語
+2. 如果沒有任何分類貼切，該卡片分類留空（不要硬塞、不要發明新分類）
+3. 每張卡片再挑「一個」最能代表它的 emoji，只能從上面的 emoji 清單挑
+4. 嚴格依照格式逐行輸出，每張卡片一行：CARD_編號：分類｜emoji
+5. 不要加任何解釋或結語
 
 請直接輸出："""
 
     def classify_cards(
         self, cards: List[ZettelkastenCard], categories: List[str],
-        book_title: str = "",
-    ) -> None:
-        """Assign fixed-category Tags to each card in place via one Ollama call.
+        book_title: str = "", *, apply_icon_fallback: bool = True,
+    ) -> bool:
+        """Assign fixed-category Tags + a page icon to each card in place.
 
-        No-op if there are no cards or no category list. On any Ollama failure
-        the cards simply keep empty `categories` (left for manual tagging).
+        One Ollama call per book. Returns whether the raw response contained at
+        least one recognizable `CARD_i:` line (see `_response_has_card_lines`) —
+        callers (the visual backfill tool) use it to tell "the model responded
+        but legitimately picked nothing usable for any card" apart from "the
+        whole call failed / came back empty / unparseable", so only the latter
+        gets retried later instead of being frozen with rule-based icons. A
+        well-formed response where every card's categories/icon end up empty
+        still returns True.
+
+        No-op returning False if there are no cards or no category list. On any
+        Ollama failure the cards keep empty `categories`; `icon` still gets a
+        deterministic fallback so it is never blank — unless the caller opts
+        out (see `apply_icon_fallback` below).
+
+        `apply_icon_fallback` (default True, matching every production caller):
+        when False, `card.icon` is left as the model's raw pick — empty string
+        if it didn't choose one — instead of being backfilled with
+        `_fallback_icon` here. This call also overwrites `card.categories`
+        with the model's own parse, which `_fallback_icon` reads from; a
+        caller that needs the fallback to reason about the card's *real*
+        categories (e.g. the visual backfill tool restoring the actual Notion
+        Tags right after this returns) must pass False and compute the
+        fallback itself afterward — otherwise the fallback baked in here
+        would already reflect the model's (possibly hallucinated) categories.
         """
         if not cards or not categories:
-            return
+            return False
+
+        self._warn_if_categories_overlap_palette(categories)
 
         prompt = self._build_classification_prompt(cards, categories)
         logger.info(
@@ -694,11 +863,22 @@ class ZettelkastenLLMEnhancer:
         logger.debug(f"Ollama classify raw response ({len(raw)} chars): {raw[:500]}")
         parsed = self._parse_classification(raw, len(cards), categories)
         assigned = 0
-        for card, cats in zip(cards, parsed):
+        model_icons = 0
+        for card, (cats, icon) in zip(cards, parsed):
             card.categories = cats
+            # 先寫 categories，_fallback_icon 才吃得到分類預設
+            card.icon = (icon or self._fallback_icon(card)) if apply_icon_fallback else icon
             if cats:
                 assigned += 1
-        logger.info(f"Ollama classify done: {assigned}/{len(cards)} cards tagged")
+            if icon:
+                model_icons += 1
+        parsed_ok = self._response_has_card_lines(raw, len(cards))
+        logger.info(
+            f"Ollama classify done: {assigned}/{len(cards)} cards tagged, "
+            f"{model_icons}/{len(cards)} icons from model "
+            f"({len(cards) - model_icons} via fallback)"
+        )
+        return parsed_ok
 
     def _build_batch_prompt(self, highlights: List[Dict], book_title: str = "") -> str:
         n = len(highlights)

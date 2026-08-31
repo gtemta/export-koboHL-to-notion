@@ -23,6 +23,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   新標籤」）／不帶 `--dry-run` 正式寫回。掃 `cards_output/*.json`（`--dir` 可換），
   用 `_split_tags` 重切每張卡的 `tags`，其餘欄位一字不動；原子寫檔、重跑冪等。
   只改本地 JSON——Notion 上既有卡片的 `Key Word` 要靠 backfill 才會更新。
+- **Backfill card visuals**: `python tools/backfill_card_visuals.py --dry-run`（預覽
+  「卡片 → cover/icon」）／不帶 `--dry-run` 正式寫回。為卡片盒既有卡片補上 cover
+  （依 Tags 純規則）、page icon（標題＋Key Word 批次送 Ollama 挑 emoji）與
+  `加工狀態=🌱未加工`。**已有值一律不覆蓋** → 重跑冪等，也不會蓋掉手動換過的圖。
+  Ollama 不可用時只補 cover，icon 留待下次重跑。**順序要求**：若卡片盒裡還有
+  卡片缺 來源/Tags，先跑 `backfill_zettelkasten.py` 補齊分類，**再**跑這支工具
+  ——cover 依 Tags 挑色且已有 cover 不覆蓋，若順序反過來，沒 Tags 的卡先拿到
+  預設米色 cover，之後 Tags 補上了也不會回頭補色（不寫覆蓋邏輯是刻意的，避免
+  蓋掉使用者手動換過的圖）。
 
 ### Quality gates
 - **Lint**: `python -m ruff check .` (config in `pyproject.toml`; `legacy/` + `analysis/` excluded)
@@ -138,6 +147,40 @@ to the generator, persists the batch via `CardStore`, then uploads through
 共用同一份，避免兩邊漂移。既有 JSON 用該工具重切（T2）；**已上傳 Notion 的卡片
 `Key Word` 欄仍是舊值**，要等 backfill 才會更新。
 
+### 卡片視覺與回訪（2026-08-05）
+
+卡片牆的辨識度靠兩層：**cover 分領域、icon 分卡片**。
+- **cover**：`src/infrastructure/notion/card_visuals.py`（純函式）把分類對到 Notion
+  內建 cover URL。這是全 repo 唯一知道 cover URL 長相的地方，repository 與回填工具
+  共用。未在對照表內的自訂分類走 **sha1** 穩定雜湊挑色——**不可用內建 `hash()`**，
+  字串 hash 每 process 有隨機 salt，會讓同一張卡每次跑換色。
+  `gradients_10.png` 與 woodblocks 系列已下架（404），不得使用。
+- **icon**：`zettelkasten_generator.py` 的 `_ICON_PALETTE`（40 個 emoji）。模型只能
+  「從清單裡挑」而非自由生成，因此不需要 codepoint 驗證，也不會送出 Notion 拒收的
+  畸形 ZWJ 序列。調色盤有兩條由測試把關的不變條件：**單一 codepoint**、且**與分類
+  自帶的 emoji 零交集**（後者讓 parser「行內出現的調色盤 emoji 必為 icon」這條規則
+  嚴格成立）。
+- **搭便車**：icon 由既有的批次分類呼叫 `classify_cards` 順便產出（格式
+  `CARD_i：分類｜emoji`），**不動產卡與審核 prompt**，也不多一輪 LLM。
+  `classify_cards` 回傳 bool 表示「回應是否可解析」，讓回填工具能區分「模型沒挑
+  這張」與「整批呼叫失敗」。
+- **`_fallback_icon` 是保底不是裝飾**：扛「同書 16 張卡可辨」的是 icon，而 icon 來自
+  本地小模型；模型沒挑或挑了清單外的值時由關鍵字表／分類預設遞補，保證
+  `main.py`／`GenerateBookCardsUseCase` 這條路徑產的卡永不空白。**這個保證不涵蓋
+  `legacy/uploadToNotion.py`**：該路徑的 `ZettelkastenCardGenerator(...)` 建構時
+  不帶 `tag_categories`，`generate_cards_with_review` 只在 `self.tag_categories`
+  非空時才呼叫 `classify_cards`（icon 由它搭便車產生），所以 legacy 產的卡
+  `icon` 全空；`sync_zettelkasten_cards()` 的 `pages.create` 也完全沒有
+  `cover`/`icon`/`加工狀態` 三個 kwargs（甚至 properties 欄名都跟新 schema 不同，
+  如 `Title` 而非 `標題`）。經 legacy 入口建立的卡片一律沒有 cover/icon/加工狀態，
+  要靠 `tools/backfill_card_visuals.py` 事後補齊。
+- **`classify_cards(..., apply_icon_fallback=False)`**：預設 `True` 時保底邏輯內建
+  在 `classify_cards` 裡執行；回填工具傳 `False` 跳過它，只拿模型的原始挑選結果
+  （可能是空字串），再自己對照卡片在 Notion 上**真實**的 Tags 補保底——因為
+  `classify_cards` 同時會用模型當下解析出的（可能是幻覺）分類覆寫
+  `card.categories`，內建保底若在那之後就地執行，吃到的會是這份幻覺分類而非
+  卡片的真實分類。
+
 ### Entry point flow
 
 `main.py` → `Settings.from_env()` → `container.build_use_case(settings)` → `SyncBooksUseCase.execute()`.
@@ -216,6 +259,12 @@ Run legacy via `python -m legacy.uploadToNotion` (the module adjusts `sys.path` 
   list), `來源劃線ID` (rich_text, enables per-highlight dedup). The old `主題`,
   `品質分數` and `狀態` columns are no longer written — review results stay local
   (see 卡片審核閘門). Existing columns in the user's DB are left alone, just unused.
+  回訪／視覺欄位（同樣由 `_ensure_schema` 自動建立）：`加工狀態` (select：
+  🌱未加工/🌿已重寫/🌳永久筆記，建卡時一律寫 🌱)、`建立日期` (created_time，值由
+  Notion 自算)、`上次回顧` (date，純手動)。每張卡另有 page **cover**（依 Tags 分類
+  對應 Notion 內建漸層，`card_visuals.cover_url_for`）與 page **icon**（emoji）。
+  ⚠️ **gallery view 需手動把 Card preview 設為 Page cover**，色卡才會顯示 ——
+  Notion API 無法修改 view 設定。
 - **Notion DB 三層關係**: 卡片盒 `來源` relation → 📚 Personal Reading List (Books
   DB, title 欄叫 `Name`)，Reading List 的 `Kobo EReader` relation → Kobo highlights
   DB。書不在 Reading List 時 repository **自動建頁**（Name=完整書名、Kobo EReader

@@ -2,6 +2,21 @@
 
 一行式架構決策紀錄：日期／決定了什麼／為什麼。新決策往上加。
 
+## 2026-08-05 — 卡片視覺用「分類色卡 + emoji icon」，不接外部圖庫
+
+卡片 cover 用 Notion 內建漸層（依 Tags 分類）、icon 用固定 emoji 調色盤，不接
+Unsplash 等外部圖庫。外部圖庫要新 API key、抽象概念幾乎抓不到相關圖，且圖床失效
+會讓整面卡片牆破圖；Notion 內建 cover 是自家 CDN、純 URL、零依賴。代價是同分類的
+卡同色——真正扛「同書可辨」的責任因此被推給 icon。
+
+## 2026-08-05 — icon 走固定調色盤，不讓模型自由生成 emoji
+
+`_ICON_PALETTE` 收 40 個單 codepoint emoji，prompt 只讓模型「從清單挑」，parser
+也只接受清單內的值。自由生成會冒出多碼點 ZWJ 序列與 variation selector，那是
+Notion icon 最常見的拒收原因——一個壞 emoji 會讓整張卡 `pages.create` 失敗。
+「從清單挑」把驗證問題變成集合查表，順帶讓「調色盤 ∩ 分類 emoji = ∅」這條不變
+條件撐起 parser 的容錯規則。
+
 ## 2026-07-10 — 書不在 Reading List 時自動建頁
 
 卡片盒 `來源` relation 指向 📚 Personal Reading List，但 Kobo 同步的書大多不在
