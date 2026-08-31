@@ -741,7 +741,9 @@ class ZettelkastenCardRepository:
                 },
             })
 
-        if card.chapter_reference:
+        # 章名可能被 _clean_chapter_reference 清成空字串（誤判成章名的劃線內文），
+        # 但進度是 Kobo 硬數據、永遠可信，不該一起消失。
+        if card.chapter_reference or card.chapter_progress:
             progress = (
                 f"（進度 {card.chapter_progress:.0%}）"
                 if card.chapter_progress else ""

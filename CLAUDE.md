@@ -181,6 +181,24 @@ to the generator, persists the batch via `CardStore`, then uploads through
   `card.categories`，內建保底若在那之後就地執行，吃到的會是這份幻覺分類而非
   卡片的真實分類。
 
+### 卡片標題與章節參照（2026-08-30）
+
+- **標題是主張句**：兩支產卡 prompt（`_build_prompt` 與 `_build_batch_prompt`）都要求
+  5-20 字的獨立論斷，**兩處必須同步改**——`main.py` 實際走的是批次那支。原文只是定義或
+  描述時退回精準的概念陳述句，不得自行推論；這是為了與審核 `correctness` 面向
+  （禁止加入原文沒說的結論）共存，**審核 prompt 因此一字未動**。
+- **章名消毒**：`_clean_chapter_reference(raw, *, from_toc)` 在**建卡當下**套用於兩個
+  `chapter_reference=` 賦值點，讓 `cards_output/*.json` 落地的就是可信值（不在 Notion
+  層 render 時才清——那樣 JSON 會留髒值，續傳與未來取材都會吃到）。
+  `from_toc` 由 `GenerateBookCardsUseCase._to_dict()` 從
+  `bool(Highlight.toc_chapter or Highlight.toc_section)` 帶入（非單純 `is not None`——
+  TOC 條目標題可能是空字串，此時目錄沒給到真實章名，落回不信任），**缺鍵預設
+  False**（legacy 入口走保守路線）。污染唯一來源是
+  `chapter_title_heuristics.extract_real_chapter_title()`——它拿劃線正文猜章名、容忍到
+  150 字；該檔案刻意未收緊，收緊它會連帶改變無 TOC 書籍的劃線頁分章。
+- 章名被清成空字串時，📖 callout 仍會保留閱讀進度（守門條件是
+  `chapter_reference or chapter_progress`）——進度是 Kobo 硬數據，不受章名判定連坐。
+
 ### Entry point flow
 
 `main.py` → `Settings.from_env()` → `container.build_use_case(settings)` → `SyncBooksUseCase.execute()`.

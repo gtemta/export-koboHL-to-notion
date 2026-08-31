@@ -81,4 +81,11 @@ class GenerateBookCardsUseCase:
             "current_chapter_progress": h.current_chapter_progress,
             "annotation": h.annotation,
             "bookmark_id": h.bookmark_id,
+            # 章名來自 Kobo 目錄還是 heuristic 猜的——決定 _clean_chapter_reference
+            # 要不要審查它。缺這個鍵時預設 False（不信任），legacy 入口因此走保守路線。
+            # 不能只看 toc_chapter is not None：TocChapterResolver 對空白標題的 TOC
+            # 條目仍會回傳非 None 但是空字串的 toc_chapter（title=(title or "").strip()），
+            # 此時 kobo_sqlite_repository 實際用的章名是 _initial_chapter_name 猜的，
+            # 不是目錄給的——用 or 讓空字串（falsy）正確落回不信任。
+            "chapter_from_toc": bool(h.toc_chapter or h.toc_section),
         }

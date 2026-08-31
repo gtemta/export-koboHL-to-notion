@@ -139,6 +139,34 @@ def _ollama_generate(
         return _partial()
 
 
+# 章節參照消毒（K4）。污染唯一來源是 chapter_title_heuristics.extract_real_chapter_title()
+# ——它拿劃線正文去猜章名、容忍到 150 字，只要含「：」就給 3 分信心，於是整段內文會被
+# 當成章名印在卡片的 📖 callout 上。TOC 來源的章名是 Kobo 目錄的真實標題，不做任何判斷。
+_CHAPTER_JUNK_CHARS = ('」', '「', '⋯', '。')
+_CHAPTER_MAX_LEN = 25
+# 三個哨兵值分別來自：兩處 highlight.get('chapter_name', 'Unknown') 的預設值、
+# kobo_sqlite_repository._initial_chapter_name 找不到任何章名信號時的回傳值、
+# legacy/DBReader.py 的簡體版本（legacy 匯出路徑仍可能產生）。
+_CHAPTER_UNKNOWN = ('Unknown', '未知章節', '未知章节')
+
+
+def _clean_chapter_reference(raw: Optional[str], *, from_toc: bool) -> str:
+    """回傳可信的章節標籤；判定為劃線內文時回空字串。
+
+    `from_toc=True` 代表章名來自 Kobo 目錄（`Highlight.toc_chapter` 非 None），
+    一律照留。其餘都是猜的，才套長度與標點的審查規則。
+    """
+    text = (raw or '').strip()
+    if not text or text in _CHAPTER_UNKNOWN:
+        return ''
+    if from_toc:
+        return text
+    if len(text) > _CHAPTER_MAX_LEN or any(c in text for c in _CHAPTER_JUNK_CHARS):
+        logger.debug(f"章節參照疑似劃線內文，已捨棄：{text[:30]}")
+        return ''
+    return text
+
+
 @dataclass
 class ZettelkastenCard:
     """Represents a single Zettelkasten note card"""
@@ -418,14 +446,17 @@ class ZettelkastenLLMEnhancer:
         Generate a Zettelkasten card from a highlight using Ollama.
 
         Returns a ZettelkastenCard with:
-        - Title: 5-15 characters summarizing the core concept
+        - Title: a 5-20 character claim the card can stand on
         - Content: 100-150 characters atomic note in own words
 
         `book_theme` and `revision_hint` are optional context used when the
         review gate sends a rejected card back for a second attempt.
         """
         text = highlight.get('text', '').strip()
-        chapter = highlight.get('chapter_name', 'Unknown')
+        chapter = _clean_chapter_reference(
+            highlight.get('chapter_name', 'Unknown'),
+            from_toc=bool(highlight.get('chapter_from_toc', False)),
+        )
         progress = highlight.get('chapter_progress', 0.0)
         annotation = (highlight.get('annotation') or '').strip()
 
@@ -491,12 +522,14 @@ class ZettelkastenLLMEnhancer:
 {highlight_text}
 {annotation_context}{theme_context}{revision_context}
 請生成卡片筆記，格式如下：
-【標題】5-15個字，概括這段話的核心概念
+【標題】5-20個字，寫成一句可以獨立成立的論斷，讓人不看內容也知道這張卡主張什麼
+（✅「語言愈先進，謊言愈精美」／❌「語言的進化與欺騙藝術的關係」）
+若原文只是定義或描述、本身沒有論斷，就寫成精準的概念陳述句，不要自行推論出原文沒有的結論
 【內容】100-150個字，用你自己的話重新闡述這個觀點的關鍵洞見，要確保這是一個完整、獨立的原子筆記
 【標籤】2-3個概念標籤，用頓號分隔（例如：習慣、複利、系統思考），方便日後跨書用概念瀏覽
 
 注意事項：
-1. 標題要精準、簡潔，能讓人一眼看出核心概念
+1. 標題要精準、簡潔，能讓人一眼看出這張卡主張什麼
 2. 內容要用自己的話重述，不要直接複製原文
 3. 內容要包含原文的關鍵洞見，但要更精煉
 4. 使用繁體中文，符合台灣用語習慣
@@ -897,7 +930,7 @@ class ZettelkastenLLMEnhancer:
         format_lines = []
         for i in range(1, n + 1):
             format_lines.append(
-                f"### CARD_{i}\n【標題】5-15個字...\n【內容】100-150個字...\n"
+                f"### CARD_{i}\n【標題】5-20個字的論斷句...\n【內容】100-150個字...\n"
                 f"【標籤】2-3個概念標籤，用頓號分隔"
             )
         format_example = "\n".join(format_lines)
@@ -915,7 +948,9 @@ class ZettelkastenLLMEnhancer:
 2. 內容要用自己的話重述，不要照抄原文
 3. {n} 張卡都要給，不可省略、不可合併
 4. 分隔符只用 ### CARD_編號，不要加其他註解、結語或總結
-5. 標題 5-15 個字，內容 100-150 個字
+5. 標題 5-20 個字，要寫成一句可以獨立成立的論斷，讓人不看內容也知道這張卡主張什麼
+   （✅「語言愈先進，謊言愈精美」／❌「語言的進化與欺騙藝術的關係」）；若原文只是定義
+   或描述、本身沒有論斷，就寫成精準的概念陳述句，不要自行推論出原文沒有的結論。內容 100-150 個字
 6. 【標籤】之間只能用頓號（、）分隔，每個標籤 2-6 個字。絕對不要用冒號、破折號、
    中點或句號把標籤串在一起（❌「語言演化：社交結構」❌「習慣-複利」✅「習慣、複利」）
 
@@ -956,7 +991,10 @@ class ZettelkastenLLMEnhancer:
             if not title or not content:
                 logger.warning(f"Batch parse: CARD_{i} missing title or content")
                 continue
-            chapter = highlight.get('chapter_name', 'Unknown')
+            chapter = _clean_chapter_reference(
+                highlight.get('chapter_name', 'Unknown'),
+                from_toc=bool(highlight.get('chapter_from_toc', False)),
+            )
             progress = highlight.get('chapter_progress', 0.0) or 0.0
             card_id = f"card_{datetime.now().strftime('%Y%m%d%H%M%S')}_{i:02d}_{hash(original) % 10000:04d}"
             results[i - 1] = ZettelkastenCard(
