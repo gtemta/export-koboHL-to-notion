@@ -69,7 +69,8 @@
 | Views API 需 Notion-Version ≥ `2025-09-03`：`POST /v1/views`，必填 `data_source_id`、`name`、`type`，並擇一 `database_id`／`view_id`／`create_database`；`create_database: {parent: {type: "page_id", page_id}}` 會在頁面上建一個 linked view；`filter` 格式同 data source query | 容器在頁面中的**落點**文件沒寫 → M1 第一個任務驗證 |
 | Google Books 不帶 key 時與全球共用每日配額：2026-09-28 實測 3/3 回 **429 "Quota exceeded … Queries per day"** | 這就是 20 本落到 Open Library 的根因 |
 | 26 本中有 **10 本**的 Kobo「ISBN」不是 ISBN-13（非 978／979 開頭，例 `7363579164627`） | 拿它查 ISBN 一定查不到 |
-| 設計當下這台電腦沒有 `KoboReader.sqlite`；`checkUSBandUpload.py` 會先把裝置 `.kobo/KoboReader.sqlite` 複製到工作目錄再跑 `main.main()` | Kobo 圖床假設無法在設計階段驗證 |
+| `checkUSBandUpload.py` 會先把裝置 `.kobo/KoboReader.sqlite` 複製到工作目錄再跑 `main.main()` | 使用者於 2026-09-28 放入資料庫後完成下列驗證 |
+| **Kobo 圖床已驗證**：`content.ImageId`（有劃線的 35 本書 35/35 有值，是獨立於 `ContentID` 的 UUID）組成 `https://cdn.kobo.com/book-images/{ImageId}/353/569/90/False/image.jpg` → **35/35** 回傳有效 JPEG（78–104 KB、約 0.2 秒）；目視確認《多巴胺國度》為正確的繁中版封面 | 舊圖床 `kbimages1-a.akamaihd.net` 同路徑回 400，不用 |
 
 ## 使用者已定案的決策（不要再問）
 
@@ -129,7 +130,7 @@
 
 1. **Kobo 官方書封**：`book.image_id`（新增，取自 `content.ImageId`）→
    `https://cdn.kobo.com/book-images/{image_id}/353/569/90/False/image.jpg`。
-   URL 格式是**假設**，M1 第一個任務用使用者的 `KoboReader.sqlite` 驗證；不成立就移除此來源並回報。
+   **已驗證**（見「關鍵事實」：35/35 命中、版本正確），是主力來源；後兩個來源只給沒有 `ImageId` 的書（例如側載）用。
 2. **Google Books**：
    - `isbn` 是真 ISBN-13（`^97[89]\d{10}$`）→ `q=isbn:{isbn}`；
    - 再以主書名（`：`／`:` 之前）`q=intitle:{主書名}`、`maxResults=5`，取第一筆「書名 text core 互相包含」的結果；
@@ -385,6 +386,10 @@ attempt 1..2:
   以及每條註記劃線的 `quote_block(h)`（與劃線頁同格式）。切批沿用劃線頁的方式：每批含巢狀 block 不超過 80
   （`total_block_count` 計算）；後一批的 `after` 取前一批最後建立的頂層 block id，維持原順序。
 
+> ⚠️ **M2 計畫前必須重新討論心得段的來源**（2026-09-28 資料盤點發現，見附錄）：使用者的 3,080 筆劃線
+> **打字註記為 0**，照上面的規則心得段對所有書都會留白。使用者實際的筆記是 **121 筆手寫 markup**（分布 26 本書），
+> SQLite 只存位置與時間、圖檔在裝置上，目前被 `_BOOKMARK_FILTER` 當成空白雜訊排除。M1 不受影響。
+
 ### 本地留存（`reading_list_output/<slug>.json`，gitignore）
 
 每本書一個檔（檔名規則同 `CardStore._slug`），欄位：`book_title`、`status`（`passed`／`rejected`／`uploaded`）、
@@ -443,8 +448,7 @@ attempt 1..2:
 
 ## 真跑驗收（DoD 第 3 條，以觀察收尾）
 
-1. **第一個任務：驗證兩個假設**（任一不成立 → 停下與使用者討論，不硬做）
-   - 用使用者的 `KoboReader.sqlite` 讀 26 本書的 `ImageId`，組 Kobo 圖床 URL 並驗證，回報命中數。
+1. **第一個任務：驗證 Views API**（不成立 → 停下與使用者討論，不硬做；Kobo 圖床已在設計階段驗證過）
    - 在 Reading List 建一頁暫時測試頁（`_spike_讀書頁`），依「版面寫入順序」寫前段 → 建 gallery（篩選指向
      《多巴胺國度》書頁，應顯示 17 張卡）→ 寫後段；確認 view 落在「筆記圖」底下、篩選正確；驗證後封存（archive）測試頁。
 2. **M1**：`DRY_RUN=true` 預覽 → `READING_LIST_PAGES=<一本閱讀中>,<一本已讀完>` 真跑 → Notion 上看到版面、封面、
@@ -457,7 +461,7 @@ attempt 1..2:
 ## 已知風險
 
 - **Views API 容器落點與 body 欄位**未驗證 → 第一個任務；失敗時退回靜態卡片清單。
-- **Kobo 圖床 URL 格式**未驗證 → 第一個任務；不成立時 Google Books 成主力，建議使用者申請免費 API key。
+- Kobo 圖床是非公開 API 的網址慣例，Kobo 日後可能更改；驗證失敗時自動落到 Google Books／Open Library，不會壞掉，只會少封面。
 - 地端小模型的剖析品質：以「只用卡片與簡介」＋交叉審核壓制；持續解析失敗的書會每次同步重試（成本：每本每次數分鐘）。
 - 第一次開 M2 需 20–70 分鐘，若經由插 USB 自動同步觸發會拖長該次同步。
 - 使用者改段落標題或種類庫名稱 → 該項跳過並 WARNING。
@@ -487,3 +491,46 @@ attempt 1..2:
   3. 封面改 Kobo 圖床優先、每張圖先驗證（20/26 透明圖的根因：不帶 key 的 Google Books 配額＋未驗證的 Open Library）
 - `.env.example`：`READING_LIST_PAGES`、`GOOGLE_BOOKS_API_KEY`
 - `.gitignore`：`reading_list_output/`
+
+## 附錄：KoboReader.sqlite 資料盤點（2026-09-28）
+
+使用者要求「若發現可以取出更多資訊，也記錄下來」。以下以唯讀方式（`mode=ro`）盤點使用者的資料庫；
+「有值」以有劃線的 35 本書（或 3,080 筆劃線）為分母。**本案只用到第一列**，其餘皆為候選，未納入任何範圍。
+
+### 書籍（`content`，`ContentType = 6`）
+
+| 欄位 | 有值 | 內容 | 用途／候選 |
+|---|---|---|---|
+| `ImageId` | 35/35 | 書封圖片 UUID | **本案 M1 使用**：Kobo 圖床封面 |
+| `Subtitle` | 26/35 | 多為原文書名（例：`DOPAMINE NATION: Finding Balance…`） | 候選：書籍資料加「原文書名」（既有同步已寫到劃線頁的 `Subtitle` 屬性） |
+| `Series`／`SeriesNumber`／`SeriesID` | 26／10／26 | 出版社書系（例：`自由學習`；部分前綴全形空白） | 候選：書籍資料加「書系」 |
+| `DateCreated` | 35/35 | 例：《多巴胺國度》`2023-03-02` | 推測為 Kobo 電子書上架日（非紙本出版日，未證實） |
+| `Language` | 35/35 | 全部 `zh` | 低價值 |
+| `AverageRating`／`RatingCount` | 6/35 | Kobo 商店評分（例：4.66／135 則） | 候選：書籍資料加「Kobo 評分」 |
+| `TimesStartedReading`／`LastTimeStartedReading` | 32/35 | 開始閱讀次數與時間 | 候選：閱讀歷程 |
+| `LastTimeFinishedReading` | 26/35 | Kobo 記錄的讀完時間 | 候選：比 Notion 自動化填的 `Done Date`（= 同步當天）更準；本案不碰 `Done Date` |
+| `TimeSpentReading`／`___PercentRead` | 34／28 | 閱讀秒數、進度 | 既有同步已寫到劃線頁 |
+| `PageProgressDirection` | 14/35 | `rtl` = 直排書 | 低價值 |
+| `WishlistedDate` | 4/35 | 曾加入願望清單的時間 | 低價值 |
+
+### 劃線（`Bookmark`）
+
+| 發現 | 數據 | 意義 |
+|---|---|---|
+| `Type` 分布 | highlight 3,080／markup 121／dogear 25；**沒有 `note`** | 同步的 `Type='highlight'` 過濾沒有漏掉任何打字註記 |
+| `Annotation`（打字註記） | **0/3,080** | 使用者不在 Kobo 打字註記 → 影響 M2 心得段（見 M2 的 ⚠️） |
+| **`markup`（手寫筆記）** | **121 筆，26 本書**（例：《從Q到Q+》18、《最有生產力的一年》18、《麥肯錫寫作技術與邏輯思考》14）；全部有位置（`StartContainerPath`）與時間 | 使用者真正的筆記。SQLite 只有位置，**圖檔在裝置上**（Kobo 慣例為 `.kobo/markups/`，未驗證——需接上 Kobo）；`checkUSBandUpload.py` 目前只複製 SQLite。候選：M2 心得段、劃線頁 |
+| `DateCreated`／`DateModified` | 3,080/3,080 | 每筆劃線的時間戳 → 可做閱讀時間軸（`docs/KNOWLEDGE_SYSTEM_GAPS.md` B4） |
+| `Color` | 18/3,080 非預設（17 筆 `2`、1 筆 `1`） | 幾乎沒用，低價值 |
+
+### 其他資料表
+
+| 資料表 | 列數 | 內容 | 評估 |
+|---|---|---|---|
+| `Shelf`／`ShelfContent` | 4／3 | 使用者書架：Creativity、Psychology、Software Engineer、主人的小說 | 幾乎沒在用 |
+| `Wishlist` | 9 | 只有 `CrossRevisionId`＋時間，書名需另外對照 | 候選：自動在 Reading List 建「Ready to Start」頁 |
+| `Reviews` | 2 | **其他讀者**的商店書評（署名非使用者） | 更正 CLAUDE.md「Reviews 個人書評」的描述 |
+| `Event` | 336 | 每本書的閱讀事件計數（`EventType` 為未文件化的數字代碼，例：46 累計 13,224 次）；`ExtraData` 含非 UTF-8 位元組，讀取需 `text_factory = bytes` | 候選：閱讀行為分析，需先研究代碼意義 |
+| `Activity` | 277 | 首頁動態（RecentBook 252 等） | 低價值 |
+| `Achievement` | 27 | 2011 年的 Kobo 徽章 | 雜訊 |
+| `KoboPlusAssets`、`volume_shortcovers`、`content_settings` | 294／3,264／10 | 訂閱資產、章節檔對照、閱讀設定 | 內部資料，低價值 |
