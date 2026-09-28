@@ -1,7 +1,8 @@
-"""Unit tests for Reading-List auto-creation when a book has no page:
-status derivation, create-page payload, and Kobo-relation backfill."""
+"""ReadingListRepository — 書不在 Reading List 時自動建頁：Status 推導、
+建頁 payload、Kobo relation 回填；以及卡片 repo 對它的委派。"""
 import unittest
 
+from src.infrastructure.notion.reading_list_repository import ReadingListRepository
 from src.infrastructure.notion.zettelkasten_card_repository import (
     ZettelkastenCardRepository,
 )
@@ -55,32 +56,26 @@ _FULL_BOOKS_SCHEMA = {
 
 
 def _make_repo(books_schema=None):
-    repo = ZettelkastenCardRepository(
+    return ReadingListRepository(
         token="fake-token",
-        database_id="cards-db",
-        books_database_id="books-db",
+        database_id="books-db",
         rate_limiter=_FakeLimiter(),
+        client=_FakeClient(
+            _FULL_BOOKS_SCHEMA if books_schema is None else books_schema
+        ),
     )
-    repo._client = _FakeClient(
-        _FULL_BOOKS_SCHEMA if books_schema is None else books_schema
-    )
-    return repo
 
 
 class TestBookStatusName(unittest.TestCase):
     def test_finished_book(self):
-        self.assertEqual(
-            ZettelkastenCardRepository._book_status_name(100), "🔖閱讀完畢")
-        self.assertEqual(
-            ZettelkastenCardRepository._book_status_name(99), "🔖閱讀完畢")
+        self.assertEqual(ReadingListRepository._book_status_name(100), "🔖閱讀完畢")
+        self.assertEqual(ReadingListRepository._book_status_name(99), "🔖閱讀完畢")
 
     def test_in_progress_book(self):
-        self.assertEqual(
-            ZettelkastenCardRepository._book_status_name(42), "📖 閱讀中")
+        self.assertEqual(ReadingListRepository._book_status_name(42), "📖 閱讀中")
 
     def test_unknown_progress_counts_as_reading(self):
-        self.assertEqual(
-            ZettelkastenCardRepository._book_status_name(None), "📖 閱讀中")
+        self.assertEqual(ReadingListRepository._book_status_name(None), "📖 閱讀中")
 
 
 class TestCreateBookPage(unittest.TestCase):
@@ -112,9 +107,9 @@ class TestCreateBookPage(unittest.TestCase):
         self.assertEqual(set(props.keys()), {"Name"})
 
     def test_no_books_database_returns_none(self):
-        repo = ZettelkastenCardRepository(
-            token="fake-token", database_id="cards-db",
-            books_database_id=None, rate_limiter=_FakeLimiter(),
+        repo = ReadingListRepository(
+            token="fake-token", database_id=None,
+            rate_limiter=_FakeLimiter(), client=_FakeClient({}),
         )
         self.assertIsNone(repo._create_book_page("x", None, None))
 
@@ -152,13 +147,47 @@ class TestBackfillKoboRelation(unittest.TestCase):
         self.assertEqual(repo._client.updated, [])
 
 
-class TestFindBookPageAutoCreates(unittest.TestCase):
+class TestResolveOrCreate(unittest.TestCase):
     def test_falls_through_to_create(self):
         repo = _make_repo()
-        page_id = repo._find_book_page("完全不存在的書", "kobo-page-1", 100)
+        page_id = repo.resolve_or_create("完全不存在的書", "kobo-page-1", 100)
         self.assertEqual(page_id, "new-books-page")
         # reverse lookup + equals + contains queries all ran and found nothing
         self.assertGreaterEqual(len(repo._client.queries), 3)
+
+
+class TestCardRepositoryDelegates(unittest.TestCase):
+    def test_builds_reading_list_sharing_client_and_limiter(self):
+        limiter = _FakeLimiter()
+        repo = ZettelkastenCardRepository(
+            token="t", database_id="cards-db",
+            books_database_id="books-db", rate_limiter=limiter,
+        )
+        self.assertIsInstance(repo._reading_list, ReadingListRepository)
+        self.assertIs(repo._reading_list._client, repo._client)
+        self.assertIs(repo._reading_list._rate_limiter, limiter)
+
+    def test_no_books_database_means_no_reading_list(self):
+        repo = ZettelkastenCardRepository(token="t", database_id="cards-db")
+        self.assertIsNone(repo._reading_list)
+        self.assertIsNone(repo.resolve_book_page("任何書"))
+
+    def test_resolve_book_page_delegates(self):
+        class _Spy:
+            def __init__(self):
+                self.calls = []
+
+            def resolve_or_create(self, *args):
+                self.calls.append(args)
+                return "books-page-9"
+
+        spy = _Spy()
+        repo = ZettelkastenCardRepository(
+            token="t", database_id="cards-db",
+            books_database_id="books-db", reading_list=spy,
+        )
+        self.assertEqual(repo.resolve_book_page("書", "kobo-1", 50), "books-page-9")
+        self.assertEqual(spy.calls, [("書", "kobo-1", 50)])
 
 
 if __name__ == "__main__":

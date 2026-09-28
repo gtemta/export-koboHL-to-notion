@@ -4,9 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from src.config.settings import DEFAULT_TAG_CATEGORIES, Settings
-from src.infrastructure.notion.zettelkasten_card_repository import (
-    ZettelkastenCardRepository,
-)
+from src.infrastructure.notion.reading_list_repository import ReadingListRepository
 from zettelkasten_generator import ZettelkastenCard, ZettelkastenLLMEnhancer
 
 ALLOWED = ["💞心理學", "🧠學習技巧", "💼商務", "🧘‍♂️人生觀點"]
@@ -310,19 +308,23 @@ class TestPaletteOverlapWarning(unittest.TestCase):
 
 
 class TestBookTitleMatching(unittest.TestCase):
-    """E4: main-title extraction + normalization used for fuzzy Books-DB match."""
+    """E4: main-title extraction + normalization used for fuzzy Books-DB match.
+
+    Moved to ReadingListRepository (task 2, 2026-09-29); still exercised here
+    since this file is Phase 1's E3/E4 test home.
+    """
 
     def test_splits_on_halfwidth_colon(self):
-        self.assertEqual(ZettelkastenCardRepository._main_title("原子習慣: 副標"), "原子習慣")
+        self.assertEqual(ReadingListRepository._main_title("原子習慣: 副標"), "原子習慣")
 
     def test_splits_on_fullwidth_colon(self):
-        self.assertEqual(ZettelkastenCardRepository._main_title("原子習慣：副標題"), "原子習慣")
+        self.assertEqual(ReadingListRepository._main_title("原子習慣：副標題"), "原子習慣")
 
     def test_normalize_fullwidth_space(self):
-        self.assertEqual(ZettelkastenCardRepository._normalize("原子　習慣  "), "原子 習慣")
+        self.assertEqual(ReadingListRepository._normalize("原子　習慣  "), "原子 習慣")
 
     def test_no_colon_returns_whole_title(self):
-        self.assertEqual(ZettelkastenCardRepository._main_title("多巴胺國度"), "多巴胺國度")
+        self.assertEqual(ReadingListRepository._main_title("多巴胺國度"), "多巴胺國度")
 
 
 class TestTagCategorySettings(unittest.TestCase):
