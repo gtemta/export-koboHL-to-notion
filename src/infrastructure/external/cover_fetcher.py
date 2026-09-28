@@ -135,14 +135,12 @@ class CoverFinder:
         except requests.RequestException as e:
             logger.debug(f"Google Books 查詢失敗: {e}")
             return []
-        if response.status_code == 429:
+        if response.status_code != 200:
             if not self._google_exhausted:
                 logger.warning(
-                    "Google Books 配額用盡（429），本輪不再查詢；"
-                    "可設定 GOOGLE_BOOKS_API_KEY 取得自己的配額")
+                    f"Google Books 查詢失敗（HTTP {response.status_code}），"
+                    "本輪不再查詢；可設定 GOOGLE_BOOKS_API_KEY 取得自己的配額")
             self._google_exhausted = True
-            return []
-        if response.status_code != 200:
             return []
         try:
             return response.json().get("items") or []

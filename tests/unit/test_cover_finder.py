@@ -87,6 +87,19 @@ class TestCoverFinder(unittest.TestCase):
         self.assertIsNone(finder.find(_book(id="b2", image_id=None)))
         self.assertEqual(len(_google_calls(http)), 1)  # 第二本書完全不問 Google
 
+    def test_google_non_200_abandons_source_and_warns_once(self):
+        http = _FakeHttp([
+            (lambda u, p: u.startswith(_GOOGLE), _Resp(status=403, ctype="application/json")),
+        ])
+        finder = CoverFinder(http_get=http)
+        with self.assertLogs("src.infrastructure.external.cover_fetcher",
+                              level="WARNING") as cm:
+            finder.find(_book(image_id=None))
+        self.assertEqual(len(_google_calls(http)), 1)  # ISBN 查詢一次 403 後即放棄本書
+        self.assertTrue(any("403" in message for message in cm.output))
+        finder.find(_book(id="b2", image_id=None))
+        self.assertEqual(len(_google_calls(http)), 1)  # 第二本書完全不問 Google
+
     def test_title_search_rejects_other_books(self):
         payload = {"items": [
             {"volumeInfo": {"title": "多巴胺的秘密",
