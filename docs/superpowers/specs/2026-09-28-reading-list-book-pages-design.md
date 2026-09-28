@@ -66,7 +66,7 @@
 | 事實 | 備註 |
 |------|------|
 | notion-client 2.2.1：預設 Notion-Version `2022-06-28`；`pages.create`／`pages.update` 以 `pick()` 白名單過濾參數（`template` 等新參數會被**靜默丟掉**）；`blocks.children.append` 有傳 `after`；`Client.request(path, method, body)` 可原樣送出任何 body | 已讀原始碼確認 |
-| Views API 需 Notion-Version ≥ `2025-09-03`：`POST /v1/views`，必填 `data_source_id`、`name`、`type`，並擇一 `database_id`／`view_id`／`create_database`；`create_database: {parent: {type: "page_id", page_id}}` 會在頁面上建一個 linked view；`filter` 格式同 data source query | 容器在頁面中的**落點**文件沒寫 → M1 第一個任務驗證 |
+| Views API 需 Notion-Version ≥ `2025-09-03`（目前最新 `2026-03-11`）：`POST /v1/views`，必填 `data_source_id`、`name`、`type`，並擇一 `database_id`／`view_id`／`create_database`；`create_database: {parent: {type: "page_id", page_id}, position: {type: "after_block", block_id}}` 在頁面上建 linked view，**可指定放在某個 block 之後**（省略則加在頁尾）；`filter`／`sorts` 格式同 data source query；gallery 的 `configuration.cover.type` 可為 `page_cover`／`page_content`／`property`；回應是 View 物件（`id`、`parent.database_id`） | 依官方 reference（`/reference/create-view`）；M1 第一個任務實測確認 |
 | Google Books 不帶 key 時與全球共用每日配額：2026-09-28 實測 3/3 回 **429 "Quota exceeded … Queries per day"** | 這就是 20 本落到 Open Library 的根因 |
 | 26 本中有 **10 本**的 Kobo「ISBN」不是 ISBN-13（非 978／979 開頭，例 `7363579164627`） | 拿它查 ISBN 一定查不到 |
 | `checkUSBandUpload.py` 會先把裝置 `.kobo/KoboReader.sqlite` 複製到工作目錄再跑 `main.main()` | 使用者於 2026-09-28 放入資料庫後完成下列驗證 |
@@ -174,7 +174,7 @@
 | infra | ✚ `notion/reading_list_repository.py` | 從卡片 repo **原樣搬出**的 Books DB 邏輯＋書頁讀寫（介面見下） |
 | infra | ✎ `notion/zettelkasten_card_repository.py` | 改用 `ReadingListRepository`（約少 200 行，行為不變）；新增 `list_book_cards(books_page_id, with_content=False) -> List[BookCard]` |
 | infra | ✚ `notion/reading_list_page_blocks.py` | 純函式：段落常數、版面三段、書籍資料、mention、`find_section`、`section_is_empty`、（M2）剖析與註記 blocks |
-| infra | ✚ `notion/notion_views_client.py` | **全專案唯一**使用新版 API（`2025-09-03`）的地方 |
+| infra | ✚ `notion/notion_views_client.py` | **全專案唯一**使用新版 API（`2026-03-11`）的地方 |
 | infra | ✎ `notion/notion_api_repository.py` | `add_book_cover` 改用 `CoverFinder`＋舊封面修復；`_clean_html` 搬到 `text_utils.py` 後改為 import |
 | infra | ✚ `notion/text_utils.py` | `clean_html`（自 `notion_api_repository._clean_html` 原樣搬出）：`Description` 屬性與書籍資料的出版社簡介共用 |
 | infra | ✚ `notion/dry_run_reading_list_repository.py` | DRY_RUN decorator：讀取委派、寫入只記 log（同 `DryRunNotionRepository` 模式）；views client 同樣包一層 |
@@ -198,12 +198,14 @@ class ReadingListRepository:
     def update_page(self, page_id, properties=None, cover_url=None, icon_url=None) -> None
     def type_page_ids(self, names: List[str]) -> Dict[str, str]       # 書籍種類名稱 → 種類庫頁 id，每輪快取
 
-class NotionViewsClient:  # Client(auth=token, notion_version="2025-09-03") + client.request(...)
-    def data_source_id(self, database_id) -> str                      # GET databases/{id} → data_sources[0].id，快取
-    def create_card_gallery(self, page_id, cards_database_id, book_page_id) -> Optional[str]
+class NotionViewsClient:  # Client(auth=token, notion_version="2026-03-11") + client.request(...)
+    def data_source_id(self, database_id) -> Optional[str]            # GET databases/{id} → data_sources[0].id，快取
+    def create_card_gallery(self, page_id, cards_database_id, book_page_id,
+                            after_block_id) -> Optional[str]          # 回傳 view id
 
 class CompleteReadingListPageUseCase:
     def __init__(self, reading_list, card_repo, views, cover_finder, cards_database_id,
+                 type_mapping,                                         # DEFAULT_BOOK_TYPE_MAPPING
                  book_repo=None, analyzer=None, analysis_store=None)  # 後三者 M2 才注入
     def execute(self, book: Book, kobo_page_id: str) -> None
 ```
@@ -223,10 +225,11 @@ SyncBooksUseCase.execute()
        1. page = find_page(...)；找不到 → return（DEBUG）
        2. 不是 integration 建的 → return
        3. blocks = list_blocks(page_id)；cover = cover_finder.find(book)
-       4. 空白頁 → 寫版面（三段，見 M1），寫完**重讀一次 blocks**，供後續步驟定位段落
-       5. cover 有值時：頁面缺 cover 就補 cover、缺 icon 就補 icon（各自判斷，都用同一張書封）
-       6. `Type 書籍種類` 空白 → list_book_cards → derive_book_types → type_page_ids → update_page
-       7. （M2）見「M2：AI 剖析」
+       4. 空白頁 → 一次寫入六段版面（見 M1），寫完**重讀一次 blocks**，供後續步驟定位段落
+       5. 「筆記圖」段空白 → 建卡片 gallery，放在「筆記圖」標題之後；失敗 → WARNING、留白，下次同步自動重試
+       6. cover 有值時：頁面缺 cover 就補 cover、缺 icon 就補 icon（各自判斷，都用同一張書封）
+       7. `Type 書籍種類` 空白 → list_book_cards → derive_book_types → type_page_ids → update_page
+       8. （M2）見「M2：AI 剖析」
 ```
 
 依序執行的理由：M2 使用地端 LLM，VRAM 一次只放得下一個模型，與執行緒池內的產卡並行會互搶；依序也讓 log 可讀。
@@ -267,13 +270,15 @@ Tags 比對沿用 emoji-insensitive 的 text core 慣例（同卡片分類）。
 
 ### 版面寫入順序
 
-linked view 容器預期只能加在頁尾，所以分三次寫，讓 gallery 落在「筆記圖」底下：
+Views API 支援 `position: {type: "after_block"}`，所以版面一次寫完，gallery 再插到「筆記圖」標題之後：
 
-1. `append_blocks`：`## 書籍資料`、書封 image（有才放）、書籍資訊、「出版社簡介」toggle（有才放）、`## 筆記圖`
-2. `views.create_card_gallery(page_id, cards_database_id, book_page_id=page_id)`
-3. `append_blocks`：`## 概要`、`## 實際執行`、`## 心得`、`## 金句摘錄`、「畫線重點 → 」＋ mention（劃線頁）
+1. `append_blocks`（一次）：`## 書籍資料`、書封 image（有才放）、書籍資訊、「出版社簡介」toggle（有才放）、
+   `## 筆記圖`、`## 概要`、`## 實際執行`、`## 心得`、`## 金句摘錄`、「畫線重點 → 」＋ mention（劃線頁）
+2. 「筆記圖」段空白 → `views.create_card_gallery(page_id, cards_database_id, book_page_id=page_id,
+   after_block_id=筆記圖標題 id)`
 
-第 2 步的實際落點由第一個任務驗證；若 API 支援指定位置則改用之、順序可簡化。
+第 2 步獨立於第 1 步：gallery 建立失敗時「筆記圖」段維持空白，下次同步會再試（不改放靜態清單——
+靜態清單會讓段落變成非空白，從此再也升級不成即時 gallery）。
 
 ### 書籍資料
 
@@ -283,16 +288,20 @@ linked view 容器預期只能加在頁尾，所以分三次寫，讓 gallery �
 
 ### 卡片 gallery
 
-`POST /v1/views` body（欄位名以第一個任務驗證為準）：
+`POST /v1/views` body（第一個任務實測確認；卡片 cover 用 `page_cover`，對應卡片視覺功能的分類色卡）：
 
 ```json
 {
   "data_source_id": "<卡片盒 data source id>",
   "name": "本書卡片",
   "type": "gallery",
-  "create_database": {"parent": {"type": "page_id", "page_id": "<書頁 id>"}},
+  "create_database": {
+    "parent": {"type": "page_id", "page_id": "<書頁 id>"},
+    "position": {"type": "after_block", "block_id": "<筆記圖標題 id>"}
+  },
   "filter": {"property": "來源", "relation": {"contains": "<書頁 id>"}},
-  "sorts": [{"property": "標題", "direction": "ascending"}]
+  "sorts": [{"property": "標題", "direction": "ascending"}],
+  "configuration": {"type": "gallery", "cover": {"type": "page_cover"}}
 }
 ```
 
@@ -416,7 +425,7 @@ attempt 1..2:
 | 狀況 | 行為 |
 |---|---|
 | 單本書補頁拋例外 | 該本 try/except；`result.add_error("補頁失敗: …")`，出現在結尾摘要；**不算劃線同步失敗、不影響 exit code** |
-| Views API 失敗 | 「筆記圖」改放本書卡片的 mention 清單（靜態），WARNING |
+| Views API 失敗 | 「筆記圖」段維持空白，WARNING；下次同步自動重試（段落仍空白） |
 | 找不到封面 | 不放 image block，其餘照寫，INFO |
 | 找不到某段標題 | 該段跳過，WARNING，絕不寫到別處 |
 | Tags 對不到種類，或種類庫找不到該名稱 | 不填，WARNING（附缺少的名稱） |
@@ -437,7 +446,8 @@ attempt 1..2:
   - （M2）輸出解析（正常、缺段、編號越界、thinking 前綴、全形／半形分隔）、審核解析、剖析與註記 blocks、
     `analysis_store` 各狀態轉移
 - **fake-client 編排測試**（同 `tests/unit/test_notion_upload_batching.py` 模式）
-  - 空白頁：寫入順序為前段 → view → 後段
+  - 空白頁：六段版面一次寫入，gallery 以 `after_block` 放在「筆記圖」標題之後
+  - gallery 建立失敗 → 不拋出、段落留白；再跑一次 → 重試建立
   - 第二次執行零寫入
   - `created_by` 非 integration 的頁零寫入；`## 概要` 有內容時不寫剖析
   - dry-run decorator 零寫入
@@ -449,8 +459,9 @@ attempt 1..2:
 ## 真跑驗收（DoD 第 3 條，以觀察收尾）
 
 1. **第一個任務：驗證 Views API**（不成立 → 停下與使用者討論，不硬做；Kobo 圖床已在設計階段驗證過）
-   - 在 Reading List 建一頁暫時測試頁（`_spike_讀書頁`），依「版面寫入順序」寫前段 → 建 gallery（篩選指向
-     《多巴胺國度》書頁，應顯示 17 張卡）→ 寫後段；確認 view 落在「筆記圖」底下、篩選正確；驗證後封存（archive）測試頁。
+   - 在 Reading List 建一頁暫時測試頁（`_spike_讀書頁`），寫入版面 → 以 `after_block` 在「筆記圖」標題後建 gallery
+     （篩選指向《多巴胺國度》書頁，應顯示 17 張卡）；確認 view 落在「筆記圖」底下、類型／篩選／cover 設定正確；
+     驗證後封存（archive）測試頁。
 2. **M1**：`DRY_RUN=true` 預覽 → `READING_LIST_PAGES=<一本閱讀中>,<一本已讀完>` 真跑 → Notion 上看到版面、封面、
    gallery、書籍種類，Reading List gallery 出現書封，劃線頁的透明封面被換掉 → 改 `all` 真跑 26 頁。
 3. **M2**（M2 計畫寫完後）：挑一本已讀完的書真跑 → 看到 🤖 概要、一言以蔽之、心得註記，本地 JSON 狀態為
@@ -460,7 +471,7 @@ attempt 1..2:
 
 ## 已知風險
 
-- **Views API 容器落點與 body 欄位**未驗證 → 第一個任務；失敗時退回靜態卡片清單。
+- **Views API 是新 API**：body 依官方 reference 撰寫，第一個任務實測；失敗時「筆記圖」留白並每次同步重試。
 - Kobo 圖床是非公開 API 的網址慣例，Kobo 日後可能更改；驗證失敗時自動落到 Google Books／Open Library，不會壞掉，只會少封面。
 - 地端小模型的剖析品質：以「只用卡片與簡介」＋交叉審核壓制；持續解析失敗的書會每次同步重試（成本：每本每次數分鐘）。
 - 第一次開 M2 需 20–70 分鐘，若經由插 USB 自動同步觸發會拖長該次同步。
