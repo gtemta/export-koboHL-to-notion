@@ -27,7 +27,7 @@ _BOOK_QUERY = (
     "SELECT DISTINCT content.ContentId, content.Title, content.Subtitle, "
     "content.Attribution, content.DateLastRead, content.TimeSpentReading, "
     "content.Description, content.Publisher, content.___PercentRead, "
-    "content.LastTimeFinishedReading, content.ISBN "
+    "content.LastTimeFinishedReading, content.ISBN, content.ImageId "
     "FROM Bookmark "
     "INNER JOIN content ON Bookmark.VolumeID = content.ContentID "
     f"WHERE {_BOOKMARK_FILTER} "
@@ -78,7 +78,7 @@ class KoboSqliteRepository(BookRepository):
                 for row in conn.execute(_BOOK_QUERY).fetchall():
                     (cid, title, subtitle, author, date_last_read,
                      time_spent, description, publisher, percent_read,
-                     last_finished, isbn) = row
+                     last_finished, isbn, image_id) = row
                     books.append(Book(
                         id=cid,
                         title=title or '',
@@ -91,6 +91,7 @@ class KoboSqliteRepository(BookRepository):
                         date_last_read=date_last_read,
                         time_spent_reading=time_spent,
                         last_time_finished_reading=last_finished,
+                        image_id=image_id,
                     ))
         except sqlite3.Error as e:
             logger.error(f"讀取書籍列表失敗: {e}", exc_info=True)
