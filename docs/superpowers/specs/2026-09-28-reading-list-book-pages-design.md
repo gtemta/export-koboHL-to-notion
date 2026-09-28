@@ -66,7 +66,7 @@
 | 事實 | 備註 |
 |------|------|
 | notion-client 2.2.1：預設 Notion-Version `2022-06-28`；`pages.create`／`pages.update` 以 `pick()` 白名單過濾參數（`template` 等新參數會被**靜默丟掉**）；`blocks.children.append` 有傳 `after`；`Client.request(path, method, body)` 可原樣送出任何 body | 已讀原始碼確認 |
-| Views API 需 Notion-Version ≥ `2025-09-03`（目前最新 `2026-03-11`）：`POST /v1/views`，必填 `data_source_id`、`name`、`type`，並擇一 `database_id`／`view_id`／`create_database`；`create_database: {parent: {type: "page_id", page_id}, position: {type: "after_block", block_id}}` 在頁面上建 linked view，**可指定放在某個 block 之後**（省略則加在頁尾）；`filter`／`sorts` 格式同 data source query；gallery 的 `configuration.cover.type` 可為 `page_cover`／`page_content`／`property`；回應是 View 物件（`id`、`parent.database_id`） | 依官方 reference（`/reference/create-view`）；M1 第一個任務實測確認 |
+| Views API 需 Notion-Version ≥ `2025-09-03`（目前最新 `2026-03-11`）：`POST /v1/views`，必填 `data_source_id`、`name`、`type`，並擇一 `database_id`／`view_id`／`create_database`；`create_database: {parent: {type: "page_id", page_id}, position: {type: "after_block", block_id}}` 在頁面上建 linked view，**可指定放在某個 block 之後**（省略則加在頁尾）；`filter`／`sorts` 格式同 data source query；gallery 的 `configuration.cover.type` 可為 `page_cover`／`page_content`／`property`；回應是 View 物件（`id`、`parent.database_id`） | 依官方 reference（`/reference/create-view`）；M1 Task 1 實測通過（2026-09-29）：after_block 放置、relation 篩選、gallery page_cover 設定皆如預期 |
 | Google Books 不帶 key 時與全球共用每日配額：2026-09-28 實測 3/3 回 **429 "Quota exceeded … Queries per day"** | 這就是 20 本落到 Open Library 的根因 |
 | 26 本中有 **10 本**的 Kobo「ISBN」不是 ISBN-13（非 978／979 開頭，例 `7363579164627`） | 拿它查 ISBN 一定查不到 |
 | `checkUSBandUpload.py` 會先把裝置 `.kobo/KoboReader.sqlite` 複製到工作目錄再跑 `main.main()` | 使用者於 2026-09-28 放入資料庫後完成下列驗證 |
