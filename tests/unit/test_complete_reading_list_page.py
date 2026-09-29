@@ -1,6 +1,8 @@
 """CompleteReadingListPageUseCase — 只補 integration 建的頁、只補空白處、重跑冪等。"""
 import unittest
+from unittest import mock
 
+from src.application.use_cases import complete_reading_list_page_use_case as uc_module
 from src.application.use_cases.complete_reading_list_page_use_case import (
     CompleteReadingListPageUseCase,
 )
@@ -252,10 +254,9 @@ class TestCompleteReadingListPage(unittest.TestCase):
         rl = _FakeReadingList(_page())
         views = _FakeViews(rl)
         cards = _FakeCards([])
-        with self.assertNoLogs(
-            "src.application.use_cases.complete_reading_list_page_use_case", level="WARNING"
-        ):
+        with mock.patch.object(uc_module.logger, "warning") as warn:
             _use_case(rl, views, cards).execute(BOOK, "kobo-1")
+        warn.assert_not_called()
         self.assertFalse([u for u in rl.updates if u["properties"]])
 
 
