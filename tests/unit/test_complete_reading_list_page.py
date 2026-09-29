@@ -237,6 +237,27 @@ class TestCompleteReadingListPage(unittest.TestCase):
         self.assertEqual(views.calls, [])
         self.assertFalse([u for u in rl.updates if u["properties"]])
 
+    def test_cards_tags_dont_map_to_any_type_warns(self):
+        rl = _FakeReadingList(_page())
+        views = _FakeViews(rl)
+        cards = _FakeCards([BookCard(page_id="c0", title="卡", tags=["🍳料理"])])
+        with self.assertLogs(
+            "src.application.use_cases.complete_reading_list_page_use_case", level="WARNING"
+        ) as logs:
+            _use_case(rl, views, cards).execute(BOOK, "kobo-1")
+        self.assertTrue(any("都對不到書籍種類" in line for line in logs.output))
+        self.assertFalse([u for u in rl.updates if u["properties"]])
+
+    def test_no_cards_no_type_warning(self):
+        rl = _FakeReadingList(_page())
+        views = _FakeViews(rl)
+        cards = _FakeCards([])
+        with self.assertNoLogs(
+            "src.application.use_cases.complete_reading_list_page_use_case", level="WARNING"
+        ):
+            _use_case(rl, views, cards).execute(BOOK, "kobo-1")
+        self.assertFalse([u for u in rl.updates if u["properties"]])
+
 
 if __name__ == "__main__":
     unittest.main()

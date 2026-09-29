@@ -107,6 +107,10 @@ class CompleteReadingListPageUseCase:
         cards = self._card_repo.list_book_cards(page["id"])
         names = derive_book_types(cards, self._type_mapping)
         if not names:
+            if cards:
+                logger.warning(
+                    f"'{book.title}' 的 {len(cards)} 張卡片 Tags 都對不到書籍種類，"
+                    f"不填 {BOOK_TYPE_PROPERTY}")
             return
         ids = self._reading_list.type_page_ids(names)
         missing = [name for name in names if name not in ids]
