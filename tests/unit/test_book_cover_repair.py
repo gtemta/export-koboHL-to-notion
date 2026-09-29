@@ -1,4 +1,6 @@
-"""劃線頁封面：沒封面就補；舊 Open Library 透明圖重驗不過就換掉或清掉；有效封面不重驗。"""
+"""劃線頁封面：沒封面就補；舊 Open Library 透明圖重驗不過就換掉或清掉；有效封面不重驗；
+非舊 Open Library 的既有封面（emoji、file、使用者手動設定的其他 external）一律信任；
+讀取頁面失敗時完全不寫入。"""
 import unittest
 from types import SimpleNamespace
 
@@ -55,6 +57,30 @@ def _repo(page, finder):
     return repo
 
 
+class _RaisingClient:
+    """pages.retrieve 直接炸掉，模擬查詢封面狀態失敗（例如頁面被刪、網路中斷）。"""
+
+    def __init__(self):
+        self.updates = []
+        self.pages = SimpleNamespace(retrieve=self._retrieve, update=self._update)
+
+    def _retrieve(self, page_id):
+        raise RuntimeError("boom")
+
+    def _update(self, **kwargs):
+        self.updates.append(kwargs)
+        return {}
+
+
+def _repo_with_raising_retrieve(finder):
+    repo = NotionApiRepository.__new__(NotionApiRepository)
+    repo._client = _RaisingClient()
+    repo._rate_limiter = _NoWait()
+    repo._database_id = "db"
+    repo._cover_finder = finder
+    return repo
+
+
 class TestAddBookCover(unittest.TestCase):
     def test_page_without_cover_gets_one(self):
         repo = _repo({"icon": None, "cover": None}, _FakeFinder(found=KOBO))
@@ -92,6 +118,38 @@ class TestAddBookCover(unittest.TestCase):
         repo = _repo({"icon": None, "cover": None}, _FakeFinder(found=None))
         repo.add_book_cover("page-1", BOOK)
         self.assertEqual(repo._client.updates, [])
+
+    def test_emoji_icon_without_cover_is_trusted(self):
+        finder = _FakeFinder(found=KOBO)
+        repo = _repo({"icon": {"type": "emoji", "emoji": "📚"}, "cover": None}, finder)
+        repo.add_book_cover("page-1", BOOK)
+        self.assertEqual(repo._client.updates, [])
+        self.assertEqual(finder.find_calls, 0)
+
+    def test_file_cover_without_icon_is_trusted(self):
+        finder = _FakeFinder(found=KOBO)
+        file_cover = {"type": "file", "file": {"url": "https://s3.example.com/x.png"}}
+        repo = _repo({"icon": None, "cover": file_cover}, finder)
+        repo.add_book_cover("page-1", BOOK)
+        self.assertEqual(repo._client.updates, [])
+        self.assertEqual(finder.find_calls, 0)
+
+    def test_mixed_broken_legacy_icon_and_user_file_cover_is_trusted(self):
+        finder = _FakeFinder(found=KOBO)
+        file_cover = {"type": "file", "file": {"url": "https://s3.example.com/x.png"}}
+        repo = _repo({"icon": _ext(LEGACY), "cover": file_cover}, finder)
+        repo.add_book_cover("page-1", BOOK)
+        self.assertEqual(repo._client.updates, [])
+        self.assertEqual(finder.find_calls, 0)
+
+    def test_retrieve_failure_skips_write_and_logs_warning(self):
+        finder = _FakeFinder(found=KOBO)
+        repo = _repo_with_raising_retrieve(finder)
+        with self.assertLogs(
+                "src.infrastructure.notion.notion_api_repository", level="WARNING"):
+            repo.add_book_cover("page-1", BOOK)
+        self.assertEqual(repo._client.updates, [])
+        self.assertEqual(finder.find_calls, 0)
 
 
 if __name__ == "__main__":

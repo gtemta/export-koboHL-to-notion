@@ -126,8 +126,10 @@ class NotionApiRepository(NotionRepository):
         logger.info(f"批次更新 {len(properties)} 個屬性 for page {page_id}")
 
     def add_book_cover(self, page_id: str, book: Book) -> None:
-        existing = self._existing_cover_url(page_id)
-        if existing and not self._is_broken_cover(existing):
+        visuals = self._existing_visuals(page_id)
+        if visuals is None:
+            return  # 讀取失敗：不知道目前狀態，寧可什麼都不寫也不要瞎覆蓋
+        if visuals and not self._all_broken_legacy(visuals):
             logger.debug(f"page {page_id} 已有封面,跳過")
             return
         cover_url = self._cover_finder.find(book)
@@ -141,7 +143,7 @@ class NotionApiRepository(NotionRepository):
                 self._rate_limiter,
             )
             logger.info(f"已為 '{book.title}' 設定封面")
-        elif existing:
+        elif visuals:
             retry_with_backoff(
                 lambda: self._client.pages.update(page_id=page_id, icon=None, cover=None),
                 self._rate_limiter,
@@ -202,12 +204,12 @@ class NotionApiRepository(NotionRepository):
             props["ISBN"] = {"rich_text": [{"text": {"content": book.isbn}}]}
         return props
 
-    def _is_broken_cover(self, url: str) -> bool:
-        """只重驗舊的 Open Library 網址（1x1 透明圖那批）；其他既有封面一律信任，
-        避免每次同步對每本書多打一個 GET。"""
-        return is_legacy_openlibrary_url(url) and not self._cover_finder.is_valid_image(url)
-
-    def _existing_cover_url(self, page_id: str) -> Optional[str]:
+    def _existing_visuals(self, page_id: str) -> Optional[List[Dict[str, Any]]]:
+        """讀一次頁面現有的 icon／cover。回傳頁面上非空的 icon／cover 物件（0～2
+        個）——保留原始物件而非只取 URL，因為 emoji／file 等其他型別也要能被
+        `_all_broken_legacy` 判斷為「不是舊 Open Library 網址」而信任。
+        讀取失敗回傳 None，呼叫端據此完全不寫入、也不查 CoverFinder（不知道目前
+        狀態時，寧可跳過也不要瞎覆蓋使用者可能手動設定的封面）。"""
         try:
             page = retry_with_backoff(
                 lambda: self._client.pages.retrieve(page_id),
@@ -216,13 +218,20 @@ class NotionApiRepository(NotionRepository):
         except Exception as e:
             logger.warning(f"查詢封面狀態失敗: {e}")
             return None
-        for key in ("icon", "cover"):
-            value = page.get(key) or {}
-            if isinstance(value, dict) and value.get("type") == "external":
-                url = (value.get("external") or {}).get("url")
-                if url:
-                    return url
-        return None
+        return [page[key] for key in ("icon", "cover") if isinstance(page.get(key), dict)]
+
+    def _all_broken_legacy(self, visuals: List[Dict[str, Any]]) -> bool:
+        """只有在既有的 icon／cover 全部都是「舊 Open Library 網址」且目前都驗證
+        失效時才回真。只要有一個不是舊 OL 網址（emoji、custom_emoji、file、或已經
+        修好帶 default=false 的 external），或有一個舊 OL 網址仍然有效，就視為
+        可信任、`add_book_cover` 不會覆蓋（規格「其他既有封面一律信任」）。"""
+        for visual in visuals:
+            if visual.get("type") != "external":
+                return False
+            url = (visual.get("external") or {}).get("url")
+            if not is_legacy_openlibrary_url(url) or self._cover_finder.is_valid_image(url):
+                return False
+        return True
 
     def _append_blocks(self, page_id: str, blocks: List[Dict[str, Any]]) -> None:
         if not blocks:
