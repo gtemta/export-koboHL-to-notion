@@ -1,7 +1,7 @@
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from dotenv import load_dotenv
 
@@ -11,6 +11,21 @@ DEFAULT_TAG_CATEGORIES: List[str] = [
     "💞心理學", "🧠學習技巧", "💼商務", "🧘‍♂️人生觀點", "🧩邏輯思考",
     "🔬哲學科學", "💻軟體工程", "📈行銷", "📋專案管理", "💰理財投資",
 ]
+
+# 卡片 Tags（固定分類）→ 📚 Personal Reading List「Type 書籍種類」頁名。
+# 補書頁時以卡片 Tags 多數決推算書籍種類；順序即同票時的優先序。
+DEFAULT_BOOK_TYPE_MAPPING: Dict[str, str] = {
+    "💞心理學": "Psychology",
+    "🧠學習技巧": "Learning Skills",
+    "💼商務": "Business & Finance",
+    "💰理財投資": "Business & Finance",
+    "🧘‍♂️人生觀點": "Spiritual Inspiration",
+    "🧩邏輯思考": "Logical Thinking",
+    "🔬哲學科學": "Philosophy & Science",
+    "💻軟體工程": "Software Engineering",
+    "📈行銷": "Marketing",
+    "📋專案管理": "Project Management",
+}
 
 
 @dataclass

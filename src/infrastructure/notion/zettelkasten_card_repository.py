@@ -24,6 +24,7 @@ has already passed, so a score column would be noise. The scores live in
 """
 import hashlib
 import logging
+import re
 from typing import List, Optional, Set, Tuple
 
 from notion_client import Client
@@ -31,6 +32,7 @@ from notion_client import Client
 # zettelkasten_generator lives at project root (not yet ported into src/)
 from zettelkasten_generator import ZettelkastenCard
 
+from ...domain.entities.book_card import BookCard
 from .card_visuals import cover_url_for
 from .rate_limiter import NotionRateLimiter
 from .reading_list_repository import ReadingListRepository
@@ -193,6 +195,62 @@ class ZettelkastenCardRepository:
         read, so callers don't second-guess a property that might exist.
         """
         return self._wants(prop_name)
+
+    def list_book_cards(self, books_page_id: str) -> List[BookCard]:
+        """Cards whose 來源 relation points at a Books-DB page (properties only).
+
+        Read-only; used by Reading List page completion to derive 書籍種類.
+        """
+        cards: List[BookCard] = []
+        cursor: Optional[str] = None
+        try:
+            while True:
+                kwargs = {
+                    "database_id": self._database_id,
+                    "filter": {
+                        "property": "來源",
+                        "relation": {"contains": books_page_id},
+                    },
+                    "page_size": 100,
+                }
+                if cursor:
+                    kwargs["start_cursor"] = cursor
+                result = retry_with_backoff(
+                    lambda k=kwargs: self._client.databases.query(**k),
+                    self._rate_limiter,
+                ) or {}
+                cards.extend(self._to_book_card(p) for p in result.get("results", []))
+                if not result.get("has_more"):
+                    break
+                cursor = result.get("next_cursor")
+        except Exception as e:
+            logger.warning(f"讀取書頁 {books_page_id} 的卡片失敗: {e}")
+            return []
+        return cards
+
+    @staticmethod
+    def _to_book_card(page: dict) -> BookCard:
+        props = (page or {}).get("properties") or {}
+
+        def _plain(prop_name: str, kind: str) -> str:
+            parts = (props.get(prop_name) or {}).get(kind) or []
+            return "".join(p.get("plain_text", "") for p in parts).strip()
+
+        tags = [
+            o.get("name", "")
+            for o in (props.get(_TAGS_PROPERTY) or {}).get("multi_select") or []
+            if o.get("name")
+        ]
+        keywords = [
+            k.strip() for k in re.split(r"[、・]", _plain(_KEYWORD_PROPERTY, "rich_text"))
+            if k.strip()
+        ]
+        return BookCard(
+            page_id=page.get("id", ""),
+            title=_plain("標題", "title"),
+            tags=tags,
+            keywords=keywords,
+        )
 
     # ----- Internals -----
 
