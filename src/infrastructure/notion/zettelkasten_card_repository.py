@@ -25,7 +25,7 @@ has already passed, so a score column would be noise. The scores live in
 import hashlib
 import logging
 import re
-from typing import List, Optional, Set, Tuple
+from typing import Iterator, List, Optional, Set, Tuple
 
 from notion_client import Client
 
@@ -201,32 +201,11 @@ class ZettelkastenCardRepository:
 
         Read-only; used by Reading List page completion to derive 書籍種類.
         """
-        cards: List[BookCard] = []
-        cursor: Optional[str] = None
         try:
-            while True:
-                kwargs = {
-                    "database_id": self._database_id,
-                    "filter": {
-                        "property": "來源",
-                        "relation": {"contains": books_page_id},
-                    },
-                    "page_size": 100,
-                }
-                if cursor:
-                    kwargs["start_cursor"] = cursor
-                result = retry_with_backoff(
-                    lambda k=kwargs: self._client.databases.query(**k),
-                    self._rate_limiter,
-                ) or {}
-                cards.extend(self._to_book_card(p) for p in result.get("results", []))
-                if not result.get("has_more"):
-                    break
-                cursor = result.get("next_cursor")
+            return [self._to_book_card(p) for p in self._cards_linked_to(books_page_id)]
         except Exception as e:
             logger.warning(f"讀取書頁 {books_page_id} 的卡片失敗: {e}")
             return []
-        return cards
 
     @staticmethod
     def _to_book_card(page: dict) -> BookCard:
@@ -376,6 +355,31 @@ class ZettelkastenCardRepository:
             book_title, source_page_id, percent_read
         )
 
+    def _cards_linked_to(self, books_page_id: str) -> Iterator[dict]:
+        """Every 卡片盒 page whose 來源 relation contains `books_page_id`, all
+        pages of results. Raises on API failure — callers decide how to degrade.
+        """
+        cursor: Optional[str] = None
+        while True:
+            kwargs = {
+                "database_id": self._database_id,
+                "filter": {
+                    "property": "來源",
+                    "relation": {"contains": books_page_id},
+                },
+                "page_size": 100,
+            }
+            if cursor:
+                kwargs["start_cursor"] = cursor
+            result = retry_with_backoff(
+                lambda k=kwargs: self._client.databases.query(**k),
+                self._rate_limiter,
+            ) or {}
+            yield from result.get("results", [])
+            if not result.get("has_more"):
+                break
+            cursor = result.get("next_cursor")
+
     def _existing_source_ids(
         self, books_page_id: Optional[str]
     ) -> Tuple[Set[str], int]:
@@ -390,31 +394,12 @@ class ZettelkastenCardRepository:
 
         ids: Set[str] = set()
         total = 0
-        cursor: Optional[str] = None
         try:
-            while True:
-                kwargs = {
-                    "database_id": self._database_id,
-                    "filter": {
-                        "property": "來源",
-                        "relation": {"contains": books_page_id},
-                    },
-                    "page_size": 100,
-                }
-                if cursor:
-                    kwargs["start_cursor"] = cursor
-                result = retry_with_backoff(
-                    lambda k=kwargs: self._client.databases.query(**k),
-                    self._rate_limiter,
-                ) or {}
-                for page in result.get("results", []):
-                    total += 1
-                    sid = self._read_source_id_property(page)
-                    if sid:
-                        ids.add(sid)
-                if not result.get("has_more"):
-                    break
-                cursor = result.get("next_cursor")
+            for page in self._cards_linked_to(books_page_id):
+                total += 1
+                sid = self._read_source_id_property(page)
+                if sid:
+                    ids.add(sid)
         except Exception as e:
             logger.warning(f"卡片盒去重查詢失敗 ({books_page_id}): {e}")
             return set(), 0

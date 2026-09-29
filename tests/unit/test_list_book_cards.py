@@ -3,6 +3,7 @@ import unittest
 from types import SimpleNamespace
 
 from src.infrastructure.notion.zettelkasten_card_repository import (
+    _SOURCE_ID_PROPERTY,
     ZettelkastenCardRepository,
 )
 
@@ -18,6 +19,12 @@ def _card(pid, title, tags, keyword):
         "Tags": {"type": "multi_select", "multi_select": [{"name": t} for t in tags]},
         "Key Word": {"type": "rich_text",
                      "rich_text": [{"plain_text": keyword}] if keyword else []},
+    }}
+
+
+def _source_page(pid, source_id):
+    return {"id": pid, "properties": {
+        _SOURCE_ID_PROPERTY: {"rich_text": [{"plain_text": source_id}]},
     }}
 
 
@@ -66,6 +73,22 @@ class TestListBookCards(unittest.TestCase):
             "src.infrastructure.notion.zettelkasten_card_repository", level="WARNING"
         ):
             self.assertEqual(_repo(client).list_book_cards("rl-1"), [])
+
+
+class TestExistingSourceIds(unittest.TestCase):
+    """_existing_source_ids shares _cards_linked_to's pagination with
+    list_book_cards — this covers that shared loop from the other caller."""
+
+    def test_paginates_and_collects_ids(self):
+        client = _FakeClient({
+            None: {"results": [_source_page("c1", "BM-1")],
+                   "has_more": True, "next_cursor": "p2"},
+            "p2": {"results": [_source_page("c2", "BM-2")],
+                   "has_more": False},
+        })
+        ids, total = _repo(client)._existing_source_ids("rl-1")
+        self.assertEqual(ids, {"BM-1", "BM-2"})
+        self.assertEqual(total, 2)
 
 
 if __name__ == "__main__":
