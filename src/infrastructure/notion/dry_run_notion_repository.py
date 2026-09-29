@@ -6,7 +6,7 @@ page_id，讓 use case 的「建立 → 重查 → 上傳」流程走得下去�
 """
 import logging
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from ...domain.entities.book import Book
 from ...domain.entities.highlight import Highlight
@@ -62,5 +62,5 @@ class DryRunNotionRepository(NotionRepository):
     def update_book_metadata(self, page_id: str, book: Book) -> None:
         logger.info(f"{_PREFIX} 將更新 '{book.title}' 的元數據 (page {page_id})")
 
-    def add_book_cover(self, page_id: str, title: str, isbn: Optional[str] = None) -> None:
-        logger.info(f"{_PREFIX} 將檢查並補上 '{title}' 的封面 (page {page_id})")
+    def add_book_cover(self, page_id: str, book: Book) -> None:
+        logger.info(f"{_PREFIX} 將檢查並補上 '{book.title}' 的封面 (page {page_id})")

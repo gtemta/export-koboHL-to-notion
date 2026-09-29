@@ -84,7 +84,7 @@ class SyncBooksUseCase:
                     highlights = self.book_repo.get_highlights_with_chapters(book.id)
                     self.notion_repo.replace_book_highlights(page_id, highlights)
                 self.notion_repo.update_book_metadata(page_id, book)
-                self.notion_repo.add_book_cover(page_id, book.title, book.isbn)
+                self.notion_repo.add_book_cover(page_id, book)
                 # 補齊卡片：若卡片盒尚無此書關聯卡片，repo 內 dedup 會控制是否實際新增
                 if self.card_use_case is not None:
                     if highlights is None:
@@ -136,7 +136,7 @@ class SyncBooksUseCase:
             self.notion_repo.update_book_metadata(page_id, book)
             
             # 添加書籍封面
-            self.notion_repo.add_book_cover(page_id, book.title, book.isbn)
+            self.notion_repo.add_book_cover(page_id, book)
             
             return True
             

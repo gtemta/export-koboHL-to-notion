@@ -10,7 +10,7 @@ from notion_client.errors import APIResponseError
 from ...domain.entities.book import Book
 from ...domain.entities.highlight import Highlight
 from ...domain.repositories.notion_repository import NotionRepository
-from ..external.cover_fetcher import get_best_book_cover
+from ..external.cover_fetcher import CoverFinder, is_legacy_openlibrary_url
 from .highlight_page_blocks import (
     PAGE_TITLE,
     chapter_children,
@@ -41,10 +41,12 @@ class NotionApiRepository(NotionRepository):
     """Thin wrapper around notion_client with retry + rate-limit handling."""
 
     def __init__(self, token: str, database_id: str,
-                 rate_limiter: Optional[NotionRateLimiter] = None):
+                 rate_limiter: Optional[NotionRateLimiter] = None,
+                 cover_finder: Optional[CoverFinder] = None):
         self._database_id = database_id
         self._client = Client(auth=token)
         self._rate_limiter = rate_limiter or NotionRateLimiter()
+        self._cover_finder = cover_finder or CoverFinder()
 
     # ----- NotionRepository interface -----
 
@@ -123,23 +125,30 @@ class NotionApiRepository(NotionRepository):
         )
         logger.info(f"批次更新 {len(properties)} 個屬性 for page {page_id}")
 
-    def add_book_cover(self, page_id: str, title: str, isbn: Optional[str] = None) -> None:
-        if self._has_existing_cover(page_id):
+    def add_book_cover(self, page_id: str, book: Book) -> None:
+        existing = self._existing_cover_url(page_id)
+        if existing and not self._is_broken_cover(existing):
             logger.debug(f"page {page_id} 已有封面,跳過")
             return
-        cover_url = get_best_book_cover(title, isbn)
-        if not cover_url:
-            logger.debug(f"找不到 '{title}' 的封面")
-            return
-        retry_with_backoff(
-            lambda: self._client.pages.update(
-                page_id=page_id,
-                icon={"type": "external", "external": {"url": cover_url}},
-                cover={"type": "external", "external": {"url": cover_url}},
-            ),
-            self._rate_limiter,
-        )
-        logger.info(f"已為 '{title}' 設定封面")
+        cover_url = self._cover_finder.find(book)
+        if cover_url:
+            retry_with_backoff(
+                lambda: self._client.pages.update(
+                    page_id=page_id,
+                    icon={"type": "external", "external": {"url": cover_url}},
+                    cover={"type": "external", "external": {"url": cover_url}},
+                ),
+                self._rate_limiter,
+            )
+            logger.info(f"已為 '{book.title}' 設定封面")
+        elif existing:
+            retry_with_backoff(
+                lambda: self._client.pages.update(page_id=page_id, icon=None, cover=None),
+                self._rate_limiter,
+            )
+            logger.info(f"'{book.title}' 的舊封面無效且找不到替代，已清除")
+        else:
+            logger.debug(f"找不到 '{book.title}' 的封面")
 
     # ----- Internal helpers -----
 
@@ -193,19 +202,27 @@ class NotionApiRepository(NotionRepository):
             props["ISBN"] = {"rich_text": [{"text": {"content": book.isbn}}]}
         return props
 
-    def _has_existing_cover(self, page_id: str) -> bool:
+    def _is_broken_cover(self, url: str) -> bool:
+        """只重驗舊的 Open Library 網址（1x1 透明圖那批）；其他既有封面一律信任，
+        避免每次同步對每本書多打一個 GET。"""
+        return is_legacy_openlibrary_url(url) and not self._cover_finder.is_valid_image(url)
+
+    def _existing_cover_url(self, page_id: str) -> Optional[str]:
         try:
             page = retry_with_backoff(
                 lambda: self._client.pages.retrieve(page_id),
                 self._rate_limiter,
-            )
-            icon = page.get("icon") or {}
-            return (isinstance(icon, dict)
-                    and icon.get("type") == "external"
-                    and "url" in icon.get("external", {}))
+            ) or {}
         except Exception as e:
             logger.warning(f"查詢封面狀態失敗: {e}")
-            return False
+            return None
+        for key in ("icon", "cover"):
+            value = page.get(key) or {}
+            if isinstance(value, dict) and value.get("type") == "external":
+                url = (value.get("external") or {}).get("url")
+                if url:
+                    return url
+        return None
 
     def _append_blocks(self, page_id: str, blocks: List[Dict[str, Any]]) -> None:
         if not blocks:
