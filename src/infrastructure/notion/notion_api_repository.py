@@ -1,7 +1,6 @@
 """Notion API implementation of NotionRepository."""
 import logging
 import math
-import re
 from typing import Any, Dict, List, Optional
 
 from notion_client import Client
@@ -20,6 +19,7 @@ from .highlight_page_blocks import (
 )
 from .rate_limiter import NotionRateLimiter
 from .retry_policy import retry_with_backoff
+from .text_utils import clean_html
 
 logger = logging.getLogger(__name__)
 
@@ -198,7 +198,7 @@ class NotionApiRepository(NotionRepository):
             props["Author"] = {"rich_text": [{"text": {"content": book.author}}]}
         if book.description:
             props["Description"] = {
-                "rich_text": [{"text": {"content": _clean_html(book.description)}}]
+                "rich_text": [{"text": {"content": clean_html(book.description)}}]
             }
         if book.isbn:
             props["ISBN"] = {"rich_text": [{"text": {"content": book.isbn}}]}
@@ -330,14 +330,3 @@ class NotionApiRepository(NotionRepository):
             )
             deleted += 1
         return deleted
-
-
-def _clean_html(text: str) -> str:
-    clean = re.sub(r'<[^>]+>', '', text)
-    clean = re.sub(r'\s+', ' ', clean).strip()
-    return (clean
-            .replace('&amp;', '&')
-            .replace('&lt;', '<')
-            .replace('&gt;', '>')
-            .replace('&quot;', '"')
-            .replace('&#39;', "'"))
