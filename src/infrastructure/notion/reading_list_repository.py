@@ -74,14 +74,43 @@ class ReadingListRepository:
 
     def find_page(self, title: str, source_page_id: Optional[str] = None) -> Optional[dict]:
         """Books-DB page object — reverse lookup, then title match. Unlike
-        resolve_or_create this never creates a page."""
+        resolve_or_create this never creates a page.
+
+        A title match that turns out to be linked (via `Kobo EReader`) to a
+        DIFFERENT highlight page belongs to another book that merely shares a
+        title — rejected so its data never gets overwritten. A match with an
+        empty relation is still accepted (nothing has claimed it yet)."""
         if not self._books_database_id:
             return None
         if source_page_id:
             page = self._reverse_lookup_page(source_page_id)
             if page is not None:
                 return page
-        return self._match_book_by_name(title)
+        page = self._match_book_by_name(title)
+        if (page is not None and source_page_id
+                and self._linked_to_other_book(page, source_page_id)):
+            logger.info(
+                f"'{title}' 書名比對到的 Reading List 頁已關聯其他劃線頁，"
+                f"視為不同書，不處理（{page['id']}）"
+            )
+            return None
+        return page
+
+    @staticmethod
+    def _linked_to_other_book(page: dict, source_page_id: str) -> bool:
+        """True when page's `Kobo EReader` relation is non-empty and none of
+        its ids is `source_page_id` (compared with dashes stripped, lowercased)."""
+        relation = ((page.get("properties") or {}).get(_KOBO_RELATION_PROPERTY)
+                    or {}).get("relation") or []
+        if not relation:
+            return False
+        target = ReadingListRepository._norm_id(source_page_id)
+        return all(ReadingListRepository._norm_id(r.get("id", "")) != target
+                   for r in relation)
+
+    @staticmethod
+    def _norm_id(page_id: str) -> str:
+        return (page_id or "").replace("-", "").lower()
 
     def is_created_by_integration(self, page: dict) -> bool:
         """Whether this integration created the page. Fails closed: if our own

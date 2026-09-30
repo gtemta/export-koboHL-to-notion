@@ -94,6 +94,61 @@ class TestFindPage(unittest.TestCase):
         self.assertIsNone(_repo(database_id=None).find_page("書", "kobo-1"))
 
 
+class _RoutingClient:
+    """依 filter 的 property 分流：反查（Kobo EReader）與書名比對各自一組結果，
+    讓測試能各別控制「反查沒中、書名比對中」這種組合（_FakeClient 不分 filter，
+    兩種查詢會拿到同一包結果，測不出 F1 要的情境）。"""
+
+    def __init__(self, reverse_results=None, title_results=None):
+        self.reverse_results = list(reverse_results or [])
+        self.title_results = list(title_results or [])
+        self.databases = SimpleNamespace(query=self._query, retrieve=self._retrieve)
+
+    def _query(self, database_id, filter=None, **kwargs):
+        prop = (filter or {}).get("property")
+        results = self.reverse_results if prop == "Kobo EReader" else self.title_results
+        return {"results": list(results), "has_more": False}
+
+    def _retrieve(self, database_id):
+        return {"properties": {}}
+
+
+def _repo_routing(reverse_results=None, title_results=None):
+    return ReadingListRepository(
+        token="t", database_id="books-db", rate_limiter=_NoWait(),
+        client=_RoutingClient(reverse_results, title_results),
+    )
+
+
+class TestFindPageOtherBook(unittest.TestCase):
+    """F1：書名比對命中的頁若已關聯到別的劃線頁，視為不同書、不處理。"""
+
+    @staticmethod
+    def _matched_page(relation_ids):
+        return {"id": "rl-2", "properties": {
+            "Kobo EReader": {"type": "relation",
+                             "relation": [{"id": i} for i in relation_ids]}}}
+
+    def test_relation_points_to_a_different_highlight_page_returns_none(self):
+        page = self._matched_page(["other-highlight-id"])
+        repo = _repo_routing(reverse_results=[], title_results=[page])
+        with self.assertLogs(
+            "src.infrastructure.notion.reading_list_repository", level="INFO"
+        ) as logs:
+            self.assertIsNone(repo.find_page("書", "kobo-1"))
+        self.assertTrue(any("視為不同書" in line for line in logs.output))
+
+    def test_empty_relation_is_still_accepted(self):
+        page = self._matched_page([])
+        repo = _repo_routing(reverse_results=[], title_results=[page])
+        self.assertIs(repo.find_page("書", "kobo-1"), page)
+
+    def test_relation_id_matching_source_in_different_dash_case_is_accepted(self):
+        page = self._matched_page(["abcd1234"])
+        repo = _repo_routing(reverse_results=[], title_results=[page])
+        self.assertIs(repo.find_page("書", "AbCd-1234"), page)
+
+
 class TestCreatedByIntegration(unittest.TestCase):
     def test_bot_created_page(self):
         self.assertTrue(
