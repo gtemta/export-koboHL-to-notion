@@ -9,6 +9,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Rebuild existing pages**: `RESYNC_HIGHLIGHTS=書名子字串 python main.py`（或 `all`）—
   已匯出書籍刪除同步產生的 block（heading_1/bullet/callout/divider）後以最新章節結構
   重建；使用者手動加的內容（paragraph 等）保留。可先搭 `DRY_RUN=true` 預覽。
+- **Complete Reading List pages**: `READING_LIST_PAGES=書名子字串 python main.py`（或 `all`）—
+  只處理同步自動建立的 📚 Personal Reading List 頁：空白頁寫入「心得摘錄」六段版面、書封、
+  本書卡片 gallery、書籍種類；只補空白的段落與屬性，重跑冪等。可先搭 `DRY_RUN=true` 預覽。
 
 ### Legacy / specialized entries
 - **Zettelkasten flow**: `python -m legacy.uploadToNotion`
@@ -77,12 +80,14 @@ Kobo e-reader highlight sync to Notion databases. The codebase was refactored fr
 src/
 ├── config/settings.py                   — Settings.from_env() loads .env
 ├── domain/                              — Pure: no IO, no external deps
-│   ├── entities/                        — Book, Chapter, Highlight dataclasses
+│   ├── entities/                        — Book, Chapter, Highlight, BookCard dataclasses
 │   ├── repositories/                    — BookRepository, NotionRepository (ABCs)
-│   └── services/chapter_extractor.py    — Strategy-based chapter name fallback
+│   ├── services/chapter_extractor.py    — Strategy-based chapter name fallback
+│   └── services/reading_list_rules.py   — 卡片 Tags 多數決 → 書籍種類（純函式）
 ├── application/
 │   ├── use_cases/sync_books_use_case.py — SyncBooksUseCase.execute()
 │   ├── use_cases/generate_book_cards_use_case.py — Zettelkasten card post-sync step
+│   ├── use_cases/complete_reading_list_page_use_case.py — Reading List 書頁補完（M1）
 │   └── dtos/sync_result.py
 └── infrastructure/                      — Adapters for external systems
     ├── persistence/
@@ -97,9 +102,14 @@ src/
     │   ├── dry_run_notion_repository.py — DRY_RUN decorator: reads delegate, writes log-only
     │   ├── zettelkasten_card_repository.py — uploads cards to 卡片盒 DB (per-highlight dedup;
     │   │                                     刻意不寫任何審核痕跡，見「卡片審核閘門」)
+    │   ├── reading_list_repository.py   — Books DB：來源解析／自動建頁＋書頁讀寫
+    │   ├── reading_list_page_blocks.py  — pure block builders: Reading List 書頁六段版面、段落定位
+    │   ├── notion_views_client.py       — 唯一使用新版 API（2026-03-11）：建卡片 gallery
+    │   ├── dry_run_reading_list_repository.py — 書頁補完的 DRY_RUN decorator
+    │   ├── text_utils.py                — clean_html
     │   ├── rate_limiter.py              — thread-safe ~3 req/s limiter
     │   └── retry_policy.py              — 409/429/404 exponential backoff
-    ├── external/cover_fetcher.py        — Google Books + Open Library fallback
+    ├── external/cover_fetcher.py        — CoverFinder：Kobo 圖床 → Google Books → Open Library，逐張驗證
     └── container.py                     — composition root (build_use_case)
 ```
 
@@ -199,6 +209,33 @@ to the generator, persists the batch via `CardStore`, then uploads through
 - 章名被清成空字串時，📖 callout 仍會保留閱讀進度（守門條件是
   `chapter_reference or chapter_progress`）——進度是 Kobo 硬數據，不受章名判定連坐。
 
+### Reading List 書頁補完（2026-09-29，M1）
+
+設計：`docs/superpowers/specs/2026-09-28-reading-list-book-pages-design.md`。
+
+- **只補同步建的頁**：`page.created_by.id == users.me().id` 才處理（查不到自己的身分時一律不處理）；
+  使用者手動建的頁完全不碰。版面只寫在空白頁，每一段、每個屬性都只在空白時寫——重跑是 no-op，
+  所以**不需要回填工具**，開啟後跑一次同步就會補完既有頁。
+- **流程**：`SyncBooksUseCase` 執行緒池結束後，依書名順序逐本呼叫 `CompleteReadingListPageUseCase`
+  （只對 `READING_LIST_PAGES` 命中的書）。刻意不並行：M2 會用地端 LLM。單本失敗只記進錯誤清單，
+  不影響 exit code。
+- **版面**：六段 `heading_2`（書籍資料／筆記圖／概要／實際執行／心得／金句摘錄）一次寫入；
+  卡片 gallery 用 Views API 的 `create_database.position = after_block` 插在「筆記圖」標題後。
+  gallery 建失敗時段落留白，下次同步自動重試（不改放靜態清單——那會讓段落變非空白、永遠升級不了）。
+- **新版 API 只在一個檔案**：`notion_views_client.py` 固定 Notion-Version `2026-03-11` 並走
+  `Client.request()`；notion-client 2.2.1 的 `pages.create`／`pages.update` 會靜默丟掉不認得的參數。
+- **書封**：`CoverFinder` 依序試 Kobo 圖床（`content.ImageId` → `cdn.kobo.com/book-images/…`，
+  2026-09-28 實測 35/35）→ Google Books（真 ISBN-13、書名比對；`GOOGLE_BOOKS_API_KEY` 選填）→
+  Open Library（`?default=false`），每張都下載驗證（200、image/*、>2 KB）。劃線頁的
+  `add_book_cover` 共用它，並會重驗舊的 Open Library 網址——那批 1×1 透明圖（20/26）因此被換掉。
+- **書籍種類**：卡片 Tags 多數決（每張卡對每種類一票、同票依對照表順序、第二名需達第一名一半），
+  對照表為 `settings.DEFAULT_BOOK_TYPE_MAPPING`；種類庫與其 title 欄都從 Books DB schema 動態取得。
+  **種類庫必須分享給 integration**：Notion API 不回傳「目標 DB 未分享給 integration」的 relation 欄，
+  此時只會 WARNING、不填（2026-10-01 實測：「Dante 閱讀標籤分類庫」未分享 → 26 本都沒填）。
+- **永不寫入**：`推薦分數/5`、`Status`、`Done Date`、`Blog Link`、`slug`。
+- **M2（未做）**：讀完才寫的 🤖 AI 剖析。心得段原定放 Kobo 打字註記，但使用者的打字註記是 0 筆、
+  手寫 markup 有 121 筆——M2 計畫前需重議。
+
 ### Entry point flow
 
 `main.py` → `Settings.from_env()` → `container.build_use_case(settings)` → `SyncBooksUseCase.execute()`.
@@ -255,6 +292,13 @@ Run legacy via `python -m legacy.uploadToNotion` (the module adjusts `sys.path` 
   - `RESYNC_HIGHLIGHTS`: empty = off; `all` or comma-separated title substrings —
     matching already-exported books get their sync-generated blocks deleted and
     highlights re-uploaded (user-added blocks preserved; page id/relations stable)
+  - `READING_LIST_PAGES`: empty = off; `all` or comma-separated title substrings — complete
+    sync-created 📚 Personal Reading List pages (layout, cover, card gallery, 書籍種類; only
+    empty parts are written). Needs `NOTION_BOOKS_DATABASE_ID`; gallery + 書籍種類 also need
+    `NOTION_ZETTELKASTEN_DATABASE_ID`.
+    書籍種類 also needs the type DB (「Dante 閱讀標籤分類庫」) shared with the integration —
+    the API omits relation properties whose target DB is not shared.
+  - `GOOGLE_BOOKS_API_KEY`: optional; only for books without a Kobo `ImageId`.
   - Zettelkasten card generation (used by both `main.py` and the legacy path):
     - `ENABLE_ZETTELKASTEN_CARDS`: `true`/`false` (default `false`)
     - `NOTION_ZETTELKASTEN_DATABASE_ID`: target 卡片盒 database (required when enabled)
@@ -332,5 +376,11 @@ Run legacy via `python -m legacy.uploadToNotion` (the module adjusts `sys.path` 
   linking #3-2/#3-3 not yet done).
 - ~~**資料純度**~~：已解（2026-07-14，劃線頁 v2 第 1 批）——`_BOOKMARK_FILTER` 過濾
   `Bookmark.Type='highlight'` 與 `Hidden`，130 筆空白 dogear/markup 不再混入。
-- **Kobo 未匯出資訊**（2026-07-10 調查，候選功能）：劃線 `DateCreated`/`Color`、
-  `content.Series`/`Language`、Shelf 收藏、Reviews 個人書評、Event/Activity 閱讀行為。
+- **Kobo 未匯出資訊**：完整盤點見 spec `2026-09-28-reading-list-book-pages-design.md` 的附錄
+  （原文書名 `Subtitle`、書系 `Series`、Kobo 讀完時間、劃線 `DateCreated` 時間戳、Wishlist…）。
+  更正：`Reviews` 表是**其他讀者**的商店書評，不是使用者自己的書評。使用者的 121 筆手寫
+  `markup` 目前被 `_BOOKMARK_FILTER` 當空白排除，圖檔在裝置 `.kobo/markups/`（未驗證）。
+- **劃線頁重複上傳的競態（2026-10-01 真跑發現，既有問題）**：`check_book_exists` 靠
+  `databases.query`，其索引對 `Exported` checkbox 可延遲約 2 分鐘；新書匯出後 2 分鐘內再跑同步，
+  同一本書的劃線會被再上傳一次（實測《如何改變一個人》，已用 `RESYNC_HIGHLIGHTS` 修復）。
+  修法候選：query 回報「存在但未匯出」時，先 `pages.retrieve` 確認 `Exported` 再上傳。
