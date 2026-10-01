@@ -1,5 +1,6 @@
 """CoverFinder — Kobo 圖床優先、Google Books／Open Library 遞補、每張圖都驗證。"""
 import unittest
+from unittest import mock
 
 import requests
 
@@ -147,6 +148,23 @@ class TestCoverFinder(unittest.TestCase):
             raise requests.ConnectionError("offline")
 
         self.assertIsNone(CoverFinder(http_get=boom).find(_book()))
+
+    def test_google_exception_never_logs_the_api_key(self):
+        """F7：連線例外的訊息常帶著完整請求 URL（含 key=），不可整包印進 log。"""
+        def boom(url, params=None, timeout=None):
+            if url.startswith(_GOOGLE):
+                raise requests.ConnectionError(f"connect failed: {url}?key=SECRET")
+            return _Resp(status=404, ctype="text/html", size=10)
+
+        with mock.patch(
+            "src.infrastructure.external.cover_fetcher.logger"
+        ) as mock_logger:
+            CoverFinder(google_api_key="SECRET", http_get=boom).find(_book(image_id=None))
+
+        for method in ("debug", "info", "warning", "error"):
+            for call in getattr(mock_logger, method).call_args_list:
+                for value in list(call.args) + list(call.kwargs.values()):
+                    self.assertNotIn("SECRET", str(value))
 
 
 class TestHelpers(unittest.TestCase):

@@ -133,7 +133,8 @@ class CoverFinder:
         try:
             response = self._http_get(_GOOGLE_BOOKS_URL, params=params, timeout=_TIMEOUT)
         except requests.RequestException as e:
-            logger.debug(f"Google Books 查詢失敗: {e}")
+            # 不可印 {e}：連線例外的訊息常帶著完整請求 URL，含 ?key=<GOOGLE_BOOKS_API_KEY>。
+            logger.debug(f"Google Books 查詢失敗: {type(e).__name__}")
             return []
         if response.status_code != 200:
             if not self._google_exhausted:
