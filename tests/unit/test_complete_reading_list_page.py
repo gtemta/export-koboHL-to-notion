@@ -106,8 +106,10 @@ class _FakeCards:
 class _FakeCover:
     def __init__(self, url=COVER):
         self.url = url
+        self.calls = 0
 
     def find(self, book):
+        self.calls += 1
         return self.url
 
 
@@ -304,6 +306,46 @@ class TestCompleteReadingListPage(unittest.TestCase):
         _use_case(rl, views, cards).execute(BOOK, "kobo-1")
         self.assertEqual(cards.calls, 0)
         self.assertFalse([u for u in rl.updates if u["properties"]])
+
+
+class TestCoverLookupOnlyWhenUsable(unittest.TestCase):
+    """F5：封面只在「空白頁」或「cover／icon 缺一」時才查，省掉查了也用不到的呼叫。"""
+
+    @staticmethod
+    def _non_blank_blocks():
+        return [{"type": "paragraph", "id": "u1",
+                "paragraph": {"rich_text": [{"plain_text": "我先寫的一行"}]}}]
+
+    @staticmethod
+    def _use_case(rl, cover):
+        return CompleteReadingListPageUseCase(
+            reading_list=rl, card_repo=_FakeCards(_psych_cards()), views=_FakeViews(rl),
+            cover_finder=cover, cards_database_id="cards-db",
+            type_mapping=dict(DEFAULT_BOOK_TYPE_MAPPING))
+
+    def test_complete_page_skips_cover_lookup(self):
+        rl = _FakeReadingList(
+            _page(cover={"type": "external"}, icon={"type": "emoji"}),
+            blocks=self._non_blank_blocks())
+        cover = _FakeCover()
+        self._use_case(rl, cover).execute(BOOK, "kobo-1")
+        self.assertEqual(cover.calls, 0)
+
+    def test_blank_page_looks_up_cover(self):
+        rl = _FakeReadingList(_page())
+        cover = _FakeCover()
+        self._use_case(rl, cover).execute(BOOK, "kobo-1")
+        self.assertEqual(cover.calls, 1)
+
+    def test_non_blank_page_missing_icon_looks_up_and_writes_icon(self):
+        rl = _FakeReadingList(
+            _page(cover={"type": "external"}, icon=None),
+            blocks=self._non_blank_blocks())
+        cover = _FakeCover()
+        self._use_case(rl, cover).execute(BOOK, "kobo-1")
+        self.assertEqual(cover.calls, 1)
+        self.assertIn(
+            {"properties": None, "cover_url": None, "icon_url": COVER}, rl.updates)
 
 
 if __name__ == "__main__":

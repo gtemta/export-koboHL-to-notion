@@ -57,9 +57,13 @@ class CompleteReadingListPageUseCase:
             return
 
         page_id = page["id"]
-        cover_url = self._cover_finder.find(book)
         blocks = self._reading_list.list_blocks(page_id)
-        if is_blank_page(blocks):
+        blank = is_blank_page(blocks)
+        # 骨架只有空白頁才需要封面；非空白頁只在 cover／icon 缺一時才需要——
+        # 兩者皆無就不查，省掉每次同步對已完整頁面的下載。
+        needs_visual = not page.get("cover") or not page.get("icon")
+        cover_url = self._cover_finder.find(book) if (blank or needs_visual) else None
+        if blank:
             logger.info(f"'{book.title}' 書頁為空白，將寫入版面（{page_id}）")
             self._reading_list.append_blocks(
                 page_id, skeleton_blocks(book, cover_url, kobo_page_id))
