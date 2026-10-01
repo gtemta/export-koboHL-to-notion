@@ -25,6 +25,7 @@ class _FakeClient:
         self.appends = []          # kwargs of each append
         self.updates = []          # kwargs of each pages.update
         self.dbs = {}              # database_id -> retrieve() result
+        self.retrieve_calls = []   # database_id of each databases.retrieve call
         self.users = SimpleNamespace(me=self._me)
         self.blocks = SimpleNamespace(
             children=SimpleNamespace(list=self._list, append=self._append))
@@ -63,6 +64,7 @@ class _FakeClient:
                 "has_more": False}
 
     def _retrieve(self, database_id):
+        self.retrieve_calls.append(database_id)
         return self.dbs.get(database_id, {"properties": {}})
 
 
@@ -247,6 +249,29 @@ class TestTypePageIds(unittest.TestCase):
             "src.infrastructure.notion.reading_list_repository", level="WARNING"
         ):
             self.assertEqual(_repo().type_page_ids(["Psychology"]), {})
+
+
+class TestBookTypesAvailable(unittest.TestCase):
+    """F2：relation 看不到時只警告一次、不重複查，且回報「不可用」讓上層跳過。"""
+
+    def test_relation_missing_from_schema_warns_once_and_caches(self):
+        client = _FakeClient()
+        repo = _repo(client)
+        with self.assertLogs(
+            "src.infrastructure.notion.reading_list_repository", level="WARNING"
+        ) as logs:
+            self.assertFalse(repo.book_types_available())
+            self.assertFalse(repo.book_types_available())
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("分享給 integration", logs.output[0])
+        self.assertEqual(len(client.retrieve_calls), 1)
+
+    def test_relation_present(self):
+        client = _FakeClient()
+        client.dbs["books-db"] = {"properties": {BOOK_TYPE_PROPERTY: {
+            "type": "relation", "relation": {"database_id": "types-db"}}}}
+        client.query_results["types-db"] = [_type_page("t-psy", "Psychology")]
+        self.assertTrue(_repo(client).book_types_available())
 
 
 if __name__ == "__main__":

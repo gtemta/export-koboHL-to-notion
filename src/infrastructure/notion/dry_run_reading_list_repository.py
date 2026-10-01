@@ -28,6 +28,9 @@ class DryRunReadingListRepository:
     def type_page_ids(self, names: List[str]) -> Dict[str, str]:
         return self._inner.type_page_ids(names)
 
+    def book_types_available(self) -> bool:
+        return self._inner.book_types_available()
+
     def list_blocks(self, page_id: str) -> List[dict]:
         with self._lock:
             pending = list(self._pending.get(page_id, []))

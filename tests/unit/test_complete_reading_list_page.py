@@ -29,11 +29,12 @@ def _page(cover=None, icon=None, types=None, with_type_prop=True):
 
 
 class _FakeReadingList:
-    def __init__(self, page, blocks=None, bot=True, type_ids=None):
+    def __init__(self, page, blocks=None, bot=True, type_ids=None, types_available=True):
         self.page = page
         self.blocks = list(blocks or [])
         self.bot = bot
         self.type_ids = type_ids if type_ids is not None else {"Psychology": "t-psy"}
+        self.types_available = types_available
         self.appended = []
         self.updates = []
 
@@ -42,6 +43,9 @@ class _FakeReadingList:
 
     def is_created_by_integration(self, page):
         return self.bot
+
+    def book_types_available(self):
+        return self.types_available
 
     def list_blocks(self, page_id):
         return list(self.blocks)
@@ -257,6 +261,26 @@ class TestCompleteReadingListPage(unittest.TestCase):
         with mock.patch.object(uc_module.logger, "warning") as warn:
             _use_case(rl, views, cards).execute(BOOK, "kobo-1")
         warn.assert_not_called()
+        self.assertFalse([u for u in rl.updates if u["properties"]])
+
+    def test_book_types_unavailable_skips_without_reading_cards(self):
+        """F2：relation 不可見時直接跳過，不查卡片、不多一條 WARNING。"""
+        rl = _FakeReadingList(_page(), types_available=False)
+        views = _FakeViews(rl)
+        cards = _FakeCards(_psych_cards())
+        with mock.patch.object(uc_module.logger, "warning") as warn:
+            _use_case(rl, views, cards).execute(BOOK, "kobo-1")
+        self.assertEqual(cards.calls, 0)
+        warn.assert_not_called()
+        self.assertFalse([u for u in rl.updates if u["properties"]])
+
+    def test_page_without_type_property_skips_without_reading_cards(self):
+        """F2（Task 9 補測）：頁面屬性完全沒有 Type 書籍種類 欄位時不查卡片。"""
+        rl = _FakeReadingList(_page(with_type_prop=False))
+        views = _FakeViews(rl)
+        cards = _FakeCards(_psych_cards())
+        _use_case(rl, views, cards).execute(BOOK, "kobo-1")
+        self.assertEqual(cards.calls, 0)
         self.assertFalse([u for u in rl.updates if u["properties"]])
 
 

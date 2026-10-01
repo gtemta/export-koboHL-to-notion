@@ -104,6 +104,8 @@ class CompleteReadingListPageUseCase:
         prop = (page.get("properties") or {}).get(BOOK_TYPE_PROPERTY)
         if prop is None or prop.get("relation"):
             return
+        if not self._reading_list.book_types_available():
+            return
         cards = self._card_repo.list_book_cards(page["id"])
         names = derive_book_types(cards, self._type_mapping)
         if not names:

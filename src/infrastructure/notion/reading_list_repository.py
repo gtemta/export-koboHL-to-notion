@@ -60,6 +60,8 @@ class ReadingListRepository:
         self._bot_id = _UNSET
         # 書籍種類名稱 → 種類庫頁 id；_UNSET = 尚未查詢
         self._type_index_cache = _UNSET
+        # book_types_available() 的快取；_type_index() 內設定，跟 index 同一輪快取
+        self._book_types_available = False
 
     def resolve_or_create(
         self,
@@ -183,6 +185,12 @@ class ReadingListRepository:
         index = self._type_index()
         return {name: index[name] for name in names if name in index}
 
+    def book_types_available(self) -> bool:
+        """True iff Books DB schema 看得到「書籍種類」relation 的目標庫，且該庫
+        讀取成功（即使零筆）。每輪快取一次，和 `_type_index()` 共用同一次查詢。"""
+        self._type_index()
+        return self._book_types_available
+
     def _bot_user_id(self) -> Optional[str]:
         if self._bot_id is _UNSET:
             try:
@@ -197,10 +205,12 @@ class ReadingListRepository:
 
     def _type_index(self) -> Dict[str, str]:
         """種類庫全部頁面的 名稱 → id。種類庫由 Books DB 的 relation 目標決定，
-        名稱取該庫 type == "title" 的欄位——兩者都不寫死。每輪只查一次。"""
+        名稱取該庫 type == "title" 的欄位——兩者都不寫死。每輪只查一次，同時
+        把 `book_types_available()` 要用的「relation 看不看得到」結果記下來。"""
         if self._type_index_cache is not _UNSET:
             return self._type_index_cache
         index: Dict[str, str] = {}
+        available = False
         try:
             db = retry_with_backoff(
                 lambda: self._client.databases.retrieve(self._books_database_id),
@@ -209,15 +219,22 @@ class ReadingListRepository:
             prop = (db.get("properties") or {}).get(BOOK_TYPE_PROPERTY) or {}
             target = (prop.get("relation") or {}).get("database_id")
             if not target:
-                logger.warning(f"Books DB 沒有「{BOOK_TYPE_PROPERTY}」relation，不填書籍種類")
+                logger.warning(
+                    f"Books DB 看不到「{BOOK_TYPE_PROPERTY}」relation：請確認欄位存在，"
+                    "且其目標種類庫已分享給 integration"
+                    "（Notion API 不回傳目標庫未分享的 relation 欄）；分享後重跑即可。"
+                    "本輪不填書籍種類"
+                )
             else:
                 for page in self._query_all(target):
                     name = self._title_of(page)
                     if name:
                         index[name] = page.get("id")
+                available = True
         except Exception as e:
             logger.warning(f"讀取書籍種類庫失敗: {e}")
         self._type_index_cache = index
+        self._book_types_available = available
         return index
 
     def _query_all(self, database_id: str) -> List[dict]:

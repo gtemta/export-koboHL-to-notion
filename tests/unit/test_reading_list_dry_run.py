@@ -25,6 +25,9 @@ class _Inner:
     def type_page_ids(self, names):
         return {"Psychology": "t-psy"}
 
+    def book_types_available(self):
+        return True
+
     def list_blocks(self, page_id):
         return [{"type": "paragraph", "id": "real-1"}]
 
@@ -68,6 +71,7 @@ class TestDryRunReadingList(unittest.TestCase):
         self.assertEqual(repo.find_page("書", "kobo-1"), {"id": "rl-1"})
         self.assertTrue(repo.is_created_by_integration({}))
         self.assertEqual(repo.type_page_ids(["Psychology"]), {"Psychology": "t-psy"})
+        self.assertTrue(repo.book_types_available())
 
     def test_views_create_is_logged_only(self):
         inner = _Inner()
