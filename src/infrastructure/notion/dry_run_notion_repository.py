@@ -16,6 +16,9 @@ from .highlight_page_blocks import chapter_tree
 logger = logging.getLogger(__name__)
 
 _PREFIX = "[DRY RUN]"
+# 本輪 dry-run「建立」書籍時配發的假 page id 前綴。這些 id 只在本輪記憶體內有
+# 意義，絕不可當成真實 page id 送進任何反查（見 DryRunReadingListRepository）。
+DRY_RUN_PAGE_ID_PREFIX = "dry-run-page-"
 
 
 class DryRunNotionRepository(NotionRepository):
@@ -39,7 +42,7 @@ class DryRunNotionRepository(NotionRepository):
 
     def create_book_entry(self, title: str) -> bool:
         with self._lock:
-            fake_id = f"dry-run-page-{len(self._created) + 1}"
+            fake_id = f"{DRY_RUN_PAGE_ID_PREFIX}{len(self._created) + 1}"
             self._created[title] = fake_id
         logger.info(f"{_PREFIX} 將建立書籍 '{title}' (模擬 page_id={fake_id})")
         return True

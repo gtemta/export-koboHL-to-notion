@@ -6,6 +6,7 @@ from src.application.use_cases.complete_reading_list_page_use_case import (
 )
 from src.config.settings import Settings
 from src.infrastructure.container import build_use_case
+from src.infrastructure.notion.dry_run_notion_repository import DRY_RUN_PAGE_ID_PREFIX
 from src.infrastructure.notion.dry_run_reading_list_repository import (
     DryRunNotionViewsClient,
     DryRunReadingListRepository,
@@ -15,8 +16,10 @@ from src.infrastructure.notion.dry_run_reading_list_repository import (
 class _Inner:
     def __init__(self):
         self.writes = []
+        self.find_page_calls = []
 
     def find_page(self, title, source_page_id=None):
+        self.find_page_calls.append((title, source_page_id))
         return {"id": "rl-1"}
 
     def is_created_by_integration(self, page):
@@ -82,6 +85,22 @@ class TestDryRunReadingList(unittest.TestCase):
             self.assertIsNone(views.create_card_gallery("rl-1", "cards", "rl-1", "h-1"))
         self.assertEqual(inner.writes, [])
         self.assertEqual(views.data_source_id("cards"), "ds-1")
+
+
+class TestFindPageDryRunSourceId(unittest.TestCase):
+    """F3：DRY_RUN 本輪建立的假 page id 不可流入 find_page 的反查。"""
+
+    def test_fake_prefixed_id_reaches_inner_as_none(self):
+        inner = _Inner()
+        repo = DryRunReadingListRepository(inner)
+        repo.find_page("書", f"{DRY_RUN_PAGE_ID_PREFIX}3")
+        self.assertEqual(inner.find_page_calls, [("書", None)])
+
+    def test_real_id_passes_through_unchanged(self):
+        inner = _Inner()
+        repo = DryRunReadingListRepository(inner)
+        repo.find_page("書", "real-kobo-page-id")
+        self.assertEqual(inner.find_page_calls, [("書", "real-kobo-page-id")])
 
 
 class TestContainerWiring(unittest.TestCase):

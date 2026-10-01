@@ -8,6 +8,8 @@ import logging
 import threading
 from typing import Dict, List, Optional
 
+from .dry_run_notion_repository import DRY_RUN_PAGE_ID_PREFIX
+
 logger = logging.getLogger(__name__)
 
 _PREFIX = "[DRY RUN]"
@@ -20,6 +22,11 @@ class DryRunReadingListRepository:
         self._lock = threading.Lock()
 
     def find_page(self, title: str, source_page_id: Optional[str] = None) -> Optional[dict]:
+        """本輪 dry-run 配發的假 page id（見 DRY_RUN_PAGE_ID_PREFIX）只在記憶體內
+        有意義，絕不是真實的劃線頁 id——流入反查只會查到不相干的結果，所以在這
+        裡攔下，退回只用書名比對。"""
+        if source_page_id and source_page_id.startswith(DRY_RUN_PAGE_ID_PREFIX):
+            source_page_id = None
         return self._inner.find_page(title, source_page_id)
 
     def is_created_by_integration(self, page: dict) -> bool:
