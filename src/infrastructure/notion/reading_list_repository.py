@@ -1,9 +1,16 @@
 """Notion repository for 📚 Personal Reading List (the Books DB).
 
-Everything that touches the Books DB lives here: resolving a book's page for
-the card「來源」relation — reverse lookup via the `Kobo EReader` relation →
-title match → auto-create — moved unchanged from ZettelkastenCardRepository,
-which now delegates to this class.
+Everything that touches the Books DB lives here, for two different callers:
+
+- Card flow (ZettelkastenCardRepository delegates to this class): resolving a
+  book's page for the card「來源」relation — reverse lookup via the
+  `Kobo EReader` relation → title match → auto-create when unlisted
+  (moved here unchanged from ZettelkastenCardRepository).
+- Reading List page completion (M1, CompleteReadingListPageUseCase): read/write
+  of the page itself — `find_page` (lookup only, never creates — a title match
+  linked to a DIFFERENT highlight page is rejected, see `find_page`),
+  `list_blocks`/`append_blocks`/`update_page`, and `book_types_available`/
+  `type_page_ids` for the 書籍種類 relation.
 """
 import logging
 from typing import Any, Dict, List, Optional

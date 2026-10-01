@@ -216,6 +216,11 @@ to the generator, persists the batch via `CardStore`, then uploads through
 - **只補同步建的頁**：`page.created_by.id == users.me().id` 才處理（查不到自己的身分時一律不處理）；
   使用者手動建的頁完全不碰。版面只寫在空白頁，每一段、每個屬性都只在空白時寫——重跑是 no-op，
   所以**不需要回填工具**，開啟後跑一次同步就會補完既有頁。
+- **書頁由卡片流程建立**：Reading List 頁只由卡片流程（`ENABLE_ZETTELKASTEN_CARDS=true` 且劃線數
+  ≥ `ZETTELKASTEN_MIN_HIGHLIGHTS`）自動建立；卡片關閉或劃線太少的新書沒有書頁，補頁步驟只記
+  DEBUG 並跳過（`find_page` 永不建頁）。
+- **`find_page` 如何分辨書**：先以 `Kobo EReader` relation 反查；反查不到才用書名比對，且書名
+  命中的頁若已關聯到**別的**劃線頁就視為別本書、不處理（relation 空白的頁照收）。
 - **流程**：`SyncBooksUseCase` 執行緒池結束後，依書名順序逐本呼叫 `CompleteReadingListPageUseCase`
   （只對 `READING_LIST_PAGES` 命中的書）。刻意不並行：M2 會用地端 LLM。單本失敗只記進錯誤清單，
   不影響 exit code。
@@ -230,11 +235,14 @@ to the generator, persists the batch via `CardStore`, then uploads through
   `add_book_cover` 共用它，並會重驗舊的 Open Library 網址——那批 1×1 透明圖（20/26）因此被換掉。
 - **書籍種類**：卡片 Tags 多數決（每張卡對每種類一票、同票依對照表順序、第二名需達第一名一半），
   對照表為 `settings.DEFAULT_BOOK_TYPE_MAPPING`；種類庫與其 title 欄都從 Books DB schema 動態取得。
-  **種類庫必須分享給 integration**：Notion API 不回傳「目標 DB 未分享給 integration」的 relation 欄，
-  此時只會 WARNING、不填（2026-10-01 實測：「Dante 閱讀標籤分類庫」未分享 → 26 本都沒填）。
+  **種類庫必須分享給 integration**：Notion API 不回傳「目標 DB 未分享給 integration」的 relation 欄；
+  此時整輪只記一次 WARNING（附分享提示）並跳過書籍種類（2026-10-01 實測：「Dante 閱讀標籤分類庫」
+  未分享 → 26 本都沒填）。
 - **永不寫入**：`推薦分數/5`、`Status`、`Done Date`、`Blog Link`、`slug`。
 - **M2（未做）**：讀完才寫的 🤖 AI 剖析。心得段原定放 Kobo 打字註記，但使用者的打字註記是 0 筆、
   手寫 markup 有 121 筆——M2 計畫前需重議。
+  M2 注意：`find_section` 不看 toggle heading 內的內容、`is_blank_page` 不看 `has_children`
+  ——M1 只在自己建的頁做附加寫入所以無害，M2 判斷「概要」是否空白前要先補。
 
 ### Entry point flow
 
@@ -384,3 +392,10 @@ Run legacy via `python -m legacy.uploadToNotion` (the module adjusts `sys.path` 
   `databases.query`，其索引對 `Exported` checkbox 可延遲約 2 分鐘；新書匯出後 2 分鐘內再跑同步，
   同一本書的劃線會被再上傳一次（實測《如何改變一個人》，已用 `RESYNC_HIGHLIGHTS` 修復）。
   修法候選：query 回報「存在但未匯出」時，先 `pages.retrieve` 確認 `Exported` 再上傳。
+- **Reading List 相關重複碼**（M1 刻意保留）：文字核心正規化 helper 三份、Notion 分頁迴圈 3–4 份
+  （`list_blocks`、`_query_all`、`_cards_linked_to` 等）、`_RICH_TEXT_LIMIT` 定義三次。
+- **卡片流程的書名比對沒有「別本書」防護**：`ReadingListRepository.resolve_or_create` 的書名
+  比對仍會接受已關聯到其他劃線頁的頁（`find_page` 已加防護，見上）；目前 35 本書名無互相包含，
+  尚未發生。
+- **非冪等寫入的重試**：`retry_with_backoff` 對 append blocks、`POST /views` 逾時重試，若第一次其實
+  已成功會重複寫入（gallery 至多重複一次：下次同步「筆記圖」段已非空白）。
