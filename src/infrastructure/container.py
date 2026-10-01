@@ -56,7 +56,7 @@ def build_use_case(settings: Settings) -> SyncBooksUseCase:
             logger.warning("DRY RUN 模式：跳過 Zettelkasten 卡片產生與上傳")
         card_use_case = None
     else:
-        card_use_case = _build_card_use_case(settings, reading_list)
+        card_use_case = _build_card_use_case(settings, reading_list, books_limiter)
     if settings.resync_highlights:
         logger.warning(
             f"RESYNC_HIGHLIGHTS 啟用：{settings.resync_highlights} — "
@@ -76,7 +76,8 @@ def build_use_case(settings: Settings) -> SyncBooksUseCase:
 
 
 def _build_card_use_case(settings: Settings,
-                         reading_list: Optional[ReadingListRepository]):
+                         reading_list: Optional[ReadingListRepository],
+                         limiter: NotionRateLimiter):
     if not settings.enable_zettelkasten_cards:
         return None
     if not settings.notion_zettelkasten_database_id:
@@ -96,6 +97,7 @@ def _build_card_use_case(settings: Settings,
         token=settings.notion_token,
         database_id=settings.notion_zettelkasten_database_id,
         books_database_id=settings.notion_books_database_id,
+        rate_limiter=limiter,
         tag_categories=settings.zettelkasten_tag_categories,
         reading_list=reading_list,
     )

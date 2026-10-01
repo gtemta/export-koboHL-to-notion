@@ -130,6 +130,14 @@ class TestContainerWiring(unittest.TestCase):
         uc = build_use_case(self._settings(notion_books_database_id=None))
         self.assertIsNone(uc.page_use_case)
 
+    def test_card_repo_shares_reading_list_rate_limiter(self):
+        """F6：卡片寫入與書頁補完共用同一個限速器，不是各自一個 ~3 req/s。"""
+        uc = build_use_case(self._settings(enable_zettelkasten_cards=True))
+        self.assertIsNotNone(uc.card_use_case)
+        self.assertIs(
+            uc.card_use_case._card_repo._rate_limiter,
+            uc.page_use_case._reading_list._rate_limiter)
+
     def test_missing_cards_database_keeps_layout_only(self):
         uc = build_use_case(self._settings(notion_zettelkasten_database_id=None))
         self.assertIsNone(uc.page_use_case._views)
