@@ -147,6 +147,28 @@ class TestCompleteReadingListPage(unittest.TestCase):
              "cover_url": None, "icon_url": None},
             rl.updates)
 
+    def test_blank_page_logs_decision_before_writing(self):
+        """F4：空白頁的決定要在 append_blocks 之前記 log，不是寫完才回報。"""
+        rl = _FakeReadingList(_page())
+        views = _FakeViews(rl)
+        order = []
+        original_append = rl.append_blocks
+
+        def tracking_append(page_id, blocks, after=None):
+            order.append("append")
+            return original_append(page_id, blocks, after=after)
+
+        rl.append_blocks = tracking_append
+        with mock.patch.object(
+            uc_module.logger, "info",
+            side_effect=lambda msg: order.append(("log", msg)),
+        ):
+            _use_case(rl, views).execute(BOOK, "kobo-1")
+
+        self.assertEqual(len(order), 2)
+        self.assertEqual(order[1], "append")
+        self.assertIn("書頁為空白，將寫入版面", order[0][1])
+
     def test_second_run_is_a_no_op(self):
         rl = _FakeReadingList(_page())
         views = _FakeViews(rl)

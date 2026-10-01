@@ -60,9 +60,9 @@ class CompleteReadingListPageUseCase:
         cover_url = self._cover_finder.find(book)
         blocks = self._reading_list.list_blocks(page_id)
         if is_blank_page(blocks):
+            logger.info(f"'{book.title}' 書頁為空白，將寫入版面（{page_id}）")
             self._reading_list.append_blocks(
                 page_id, skeleton_blocks(book, cover_url, kobo_page_id))
-            logger.info(f"'{book.title}' 書頁已建立版面（{page_id}）")
             blocks = self._reading_list.list_blocks(page_id)
 
         self._ensure_card_gallery(book, page_id, blocks)

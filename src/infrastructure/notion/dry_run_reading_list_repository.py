@@ -9,6 +9,7 @@ import threading
 from typing import Dict, List, Optional
 
 from .dry_run_notion_repository import DRY_RUN_PAGE_ID_PREFIX
+from .reading_list_repository import describe_page_update
 
 logger = logging.getLogger(__name__)
 
@@ -59,15 +60,9 @@ class DryRunReadingListRepository:
 
     def update_page(self, page_id: str, properties: Optional[dict] = None,
                     cover_url: Optional[str] = None, icon_url: Optional[str] = None) -> None:
-        parts = []
-        if properties:
-            parts.append(f"屬性 {'、'.join(properties)}")
-        if cover_url:
-            parts.append("cover")
-        if icon_url:
-            parts.append("icon")
-        if parts:
-            logger.info(f"{_PREFIX} 將更新書頁 {page_id}：{'、'.join(parts)}")
+        description = describe_page_update(properties, cover_url, icon_url)
+        if description:
+            logger.info(f"{_PREFIX} 將更新書頁 {page_id}：{description}")
 
 
 class DryRunNotionViewsClient:

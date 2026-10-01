@@ -6,7 +6,7 @@ title match → auto-create — moved unchanged from ZettelkastenCardRepository,
 which now delegates to this class.
 """
 import logging
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from notion_client import Client
 
@@ -33,6 +33,20 @@ _MAX_CHILDREN_PER_REQUEST = 100
 
 # sentinel: not yet fetched (distinct from "fetched, empty/unreadable").
 _UNSET = object()
+
+
+def describe_page_update(properties: Optional[Dict[str, Any]], cover_url: Optional[str],
+                         icon_url: Optional[str]) -> str:
+    """「這次 update_page 動了什麼」的一行描述，真實 log 與 DRY_RUN 共用同一份，
+    格式不會因為兩邊各寫一次而漂移（例如 f"屬性 Type 書籍種類、cover、icon"）。"""
+    parts = []
+    if properties:
+        parts.append(f"屬性 {'、'.join(properties)}")
+    if cover_url:
+        parts.append("cover")
+    if icon_url:
+        parts.append("icon")
+    return "、".join(parts)
 
 
 class ReadingListRepository:
@@ -157,6 +171,7 @@ class ReadingListRepository:
                 self._rate_limiter,
             ) or {}
             created.extend(response.get("results", []))
+        logger.info(f"已在書頁 {page_id} 寫入 {len(blocks)} 個 block")
         return created
 
     def update_page(
@@ -178,6 +193,9 @@ class ReadingListRepository:
             return
         retry_with_backoff(
             lambda: self._client.pages.update(**kwargs), self._rate_limiter
+        )
+        logger.info(
+            f"已更新書頁 {page_id}：{describe_page_update(properties, cover_url, icon_url)}"
         )
 
     def type_page_ids(self, names: List[str]) -> Dict[str, str]:

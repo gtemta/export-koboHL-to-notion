@@ -1,10 +1,13 @@
 """ReadingListRepository — Reading List 書頁補完需要的讀寫（M1）。"""
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
+from src.infrastructure.notion import reading_list_repository as rl_module
 from src.infrastructure.notion.reading_list_repository import (
     BOOK_TYPE_PROPERTY,
     ReadingListRepository,
+    describe_page_update,
 )
 
 
@@ -202,6 +205,14 @@ class TestAppendBlocks(unittest.TestCase):
         self.assertEqual(client.appends[1]["after"], "a1-99")
         self.assertEqual(len(created), 150)
 
+    def test_logs_info_on_success(self):
+        """F4：真實寫入成功後要留下「寫了幾個 block」的痕跡。"""
+        client = _FakeClient()
+        with mock.patch.object(rl_module.logger, "info") as info:
+            _repo(client).append_blocks("page-1", [{"x": 1}] * 3)
+        self.assertTrue(any(
+            "已在書頁 page-1 寫入 3 個 block" in str(c) for c in info.call_args_list))
+
 
 class TestUpdatePage(unittest.TestCase):
     def test_cover_icon_and_properties_in_one_call(self):
@@ -215,6 +226,17 @@ class TestUpdatePage(unittest.TestCase):
             "cover": {"type": "external", "external": {"url": "https://c/cover.jpg"}},
             "icon": {"type": "external", "external": {"url": "https://c/cover.jpg"}},
         }])
+
+    def test_logs_info_on_success(self):
+        """F4：真實寫入成功後要留下「更新了什麼」的痕跡，文字與 describe_page_update 一致。"""
+        client = _FakeClient()
+        with mock.patch.object(rl_module.logger, "info") as info:
+            _repo(client).update_page(
+                "page-1", properties={"Type 書籍種類": {"relation": []}},
+                cover_url="https://c/cover.jpg")
+        self.assertTrue(any(
+            "已更新書頁 page-1：屬性 Type 書籍種類、cover" in str(c)
+            for c in info.call_args_list))
 
     def test_nothing_to_update_skips_call(self):
         client = _FakeClient()
@@ -272,6 +294,28 @@ class TestBookTypesAvailable(unittest.TestCase):
             "type": "relation", "relation": {"database_id": "types-db"}}}}
         client.query_results["types-db"] = [_type_page("t-psy", "Psychology")]
         self.assertTrue(_repo(client).book_types_available())
+
+
+class TestDescribePageUpdate(unittest.TestCase):
+    """F4：DRY_RUN 與真實 log 共用同一份「更新了什麼」文字，格式不能漂移。"""
+
+    def test_properties_only(self):
+        self.assertEqual(
+            describe_page_update({"Type 書籍種類": {"relation": []}}, None, None),
+            "屬性 Type 書籍種類")
+
+    def test_cover_and_icon(self):
+        self.assertEqual(
+            describe_page_update(None, "https://c/x.jpg", "https://c/x.jpg"),
+            "cover、icon")
+
+    def test_all_three(self):
+        self.assertEqual(
+            describe_page_update({"P": {}}, "https://c/x.jpg", "https://c/x.jpg"),
+            "屬性 P、cover、icon")
+
+    def test_nothing_is_empty_string(self):
+        self.assertEqual(describe_page_update(None, None, None), "")
 
 
 if __name__ == "__main__":
