@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from ..entities.book import Book
 from ..entities.highlight import Highlight
@@ -34,6 +34,6 @@ class NotionRepository(ABC):
         pass
     
     @abstractmethod
-    def add_book_cover(self, page_id: str, title: str, isbn: Optional[str] = None) -> None:
-        """添加書籍封面"""
+    def add_book_cover(self, page_id: str, book: Book) -> None:
+        """補上書籍封面（icon＋cover）；無效的舊 Open Library 封面會被替換或清除"""
         pass

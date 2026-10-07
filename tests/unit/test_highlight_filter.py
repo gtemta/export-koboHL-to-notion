@@ -19,7 +19,7 @@ def _create_db(path):
         "Publisher TEXT, ___PercentRead INTEGER, LastTimeFinishedReading TEXT, "
         "ISBN TEXT, ChapterIDBookmarked TEXT, CurrentChapterEstimate REAL, "
         "CurrentChapterProgress REAL, ContentType INTEGER, BookID TEXT, "
-        "VolumeIndex INTEGER, Depth INTEGER)"
+        "VolumeIndex INTEGER, Depth INTEGER, ImageId TEXT)"
     )
     conn.execute(
         "CREATE TABLE Bookmark ("
@@ -126,6 +126,15 @@ class TestBookmarkTypeFilter(unittest.TestCase):
         """整本書只有摺角 → 不出現在書單"""
         titles = [b.title for b in self.repo.get_all_books()]
         self.assertEqual(titles, ["真書"])
+
+    def test_book_carries_kobo_image_id(self):
+        """content.ImageId 帶進 Book.image_id（Kobo 圖床封面用）"""
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("UPDATE content SET ImageId = 'img-123' WHERE ContentID = ?", (_BOOK,))
+        conn.commit()
+        conn.close()
+        books = self.repo.get_all_books()
+        self.assertEqual([b.image_id for b in books], ["img-123"])
 
 
 if __name__ == "__main__":

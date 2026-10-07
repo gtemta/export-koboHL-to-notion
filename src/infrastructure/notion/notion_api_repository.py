@@ -1,7 +1,6 @@
 """Notion API implementation of NotionRepository."""
 import logging
 import math
-import re
 from typing import Any, Dict, List, Optional
 
 from notion_client import Client
@@ -10,7 +9,7 @@ from notion_client.errors import APIResponseError
 from ...domain.entities.book import Book
 from ...domain.entities.highlight import Highlight
 from ...domain.repositories.notion_repository import NotionRepository
-from ..external.cover_fetcher import get_best_book_cover
+from ..external.cover_fetcher import CoverFinder, is_legacy_openlibrary_url
 from .highlight_page_blocks import (
     PAGE_TITLE,
     chapter_children,
@@ -20,6 +19,7 @@ from .highlight_page_blocks import (
 )
 from .rate_limiter import NotionRateLimiter
 from .retry_policy import retry_with_backoff
+from .text_utils import clean_html
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +41,12 @@ class NotionApiRepository(NotionRepository):
     """Thin wrapper around notion_client with retry + rate-limit handling."""
 
     def __init__(self, token: str, database_id: str,
-                 rate_limiter: Optional[NotionRateLimiter] = None):
+                 rate_limiter: Optional[NotionRateLimiter] = None,
+                 cover_finder: Optional[CoverFinder] = None):
         self._database_id = database_id
         self._client = Client(auth=token)
         self._rate_limiter = rate_limiter or NotionRateLimiter()
+        self._cover_finder = cover_finder or CoverFinder()
 
     # ----- NotionRepository interface -----
 
@@ -123,23 +125,32 @@ class NotionApiRepository(NotionRepository):
         )
         logger.info(f"批次更新 {len(properties)} 個屬性 for page {page_id}")
 
-    def add_book_cover(self, page_id: str, title: str, isbn: Optional[str] = None) -> None:
-        if self._has_existing_cover(page_id):
+    def add_book_cover(self, page_id: str, book: Book) -> None:
+        visuals = self._existing_visuals(page_id)
+        if visuals is None:
+            return  # 讀取失敗：不知道目前狀態，寧可什麼都不寫也不要瞎覆蓋
+        if visuals and not self._all_broken_legacy(visuals):
             logger.debug(f"page {page_id} 已有封面,跳過")
             return
-        cover_url = get_best_book_cover(title, isbn)
-        if not cover_url:
-            logger.debug(f"找不到 '{title}' 的封面")
-            return
-        retry_with_backoff(
-            lambda: self._client.pages.update(
-                page_id=page_id,
-                icon={"type": "external", "external": {"url": cover_url}},
-                cover={"type": "external", "external": {"url": cover_url}},
-            ),
-            self._rate_limiter,
-        )
-        logger.info(f"已為 '{title}' 設定封面")
+        cover_url = self._cover_finder.find(book)
+        if cover_url:
+            retry_with_backoff(
+                lambda: self._client.pages.update(
+                    page_id=page_id,
+                    icon={"type": "external", "external": {"url": cover_url}},
+                    cover={"type": "external", "external": {"url": cover_url}},
+                ),
+                self._rate_limiter,
+            )
+            logger.info(f"已為 '{book.title}' 設定封面")
+        elif visuals:
+            retry_with_backoff(
+                lambda: self._client.pages.update(page_id=page_id, icon=None, cover=None),
+                self._rate_limiter,
+            )
+            logger.info(f"'{book.title}' 的舊封面無效且找不到替代，已清除")
+        else:
+            logger.debug(f"找不到 '{book.title}' 的封面")
 
     # ----- Internal helpers -----
 
@@ -187,25 +198,40 @@ class NotionApiRepository(NotionRepository):
             props["Author"] = {"rich_text": [{"text": {"content": book.author}}]}
         if book.description:
             props["Description"] = {
-                "rich_text": [{"text": {"content": _clean_html(book.description)}}]
+                "rich_text": [{"text": {"content": clean_html(book.description)}}]
             }
         if book.isbn:
             props["ISBN"] = {"rich_text": [{"text": {"content": book.isbn}}]}
         return props
 
-    def _has_existing_cover(self, page_id: str) -> bool:
+    def _existing_visuals(self, page_id: str) -> Optional[List[Dict[str, Any]]]:
+        """讀一次頁面現有的 icon／cover。回傳頁面上非空的 icon／cover 物件（0～2
+        個）——保留原始物件而非只取 URL，因為 emoji／file 等其他型別也要能被
+        `_all_broken_legacy` 判斷為「不是舊 Open Library 網址」而信任。
+        讀取失敗回傳 None，呼叫端據此完全不寫入、也不查 CoverFinder（不知道目前
+        狀態時，寧可跳過也不要瞎覆蓋使用者可能手動設定的封面）。"""
         try:
             page = retry_with_backoff(
                 lambda: self._client.pages.retrieve(page_id),
                 self._rate_limiter,
-            )
-            icon = page.get("icon") or {}
-            return (isinstance(icon, dict)
-                    and icon.get("type") == "external"
-                    and "url" in icon.get("external", {}))
+            ) or {}
         except Exception as e:
             logger.warning(f"查詢封面狀態失敗: {e}")
-            return False
+            return None
+        return [page[key] for key in ("icon", "cover") if isinstance(page.get(key), dict)]
+
+    def _all_broken_legacy(self, visuals: List[Dict[str, Any]]) -> bool:
+        """只有在既有的 icon／cover 全部都是「舊 Open Library 網址」且目前都驗證
+        失效時才回真。只要有一個不是舊 OL 網址（emoji、custom_emoji、file、或已經
+        修好帶 default=false 的 external），或有一個舊 OL 網址仍然有效，就視為
+        可信任、`add_book_cover` 不會覆蓋（規格「其他既有封面一律信任」）。"""
+        for visual in visuals:
+            if visual.get("type") != "external":
+                return False
+            url = (visual.get("external") or {}).get("url")
+            if not is_legacy_openlibrary_url(url) or self._cover_finder.is_valid_image(url):
+                return False
+        return True
 
     def _append_blocks(self, page_id: str, blocks: List[Dict[str, Any]]) -> None:
         if not blocks:
@@ -304,14 +330,3 @@ class NotionApiRepository(NotionRepository):
             )
             deleted += 1
         return deleted
-
-
-def _clean_html(text: str) -> str:
-    clean = re.sub(r'<[^>]+>', '', text)
-    clean = re.sub(r'\s+', ' ', clean).strip()
-    return (clean
-            .replace('&amp;', '&')
-            .replace('&lt;', '<')
-            .replace('&gt;', '>')
-            .replace('&quot;', '"')
-            .replace('&#39;', "'"))

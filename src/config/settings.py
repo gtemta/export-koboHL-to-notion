@@ -1,7 +1,7 @@
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from dotenv import load_dotenv
 
@@ -11,6 +11,21 @@ DEFAULT_TAG_CATEGORIES: List[str] = [
     "💞心理學", "🧠學習技巧", "💼商務", "🧘‍♂️人生觀點", "🧩邏輯思考",
     "🔬哲學科學", "💻軟體工程", "📈行銷", "📋專案管理", "💰理財投資",
 ]
+
+# 卡片 Tags（固定分類）→ 📚 Personal Reading List「Type 書籍種類」頁名。
+# 補書頁時以卡片 Tags 多數決推算書籍種類；順序即同票時的優先序。
+DEFAULT_BOOK_TYPE_MAPPING: Dict[str, str] = {
+    "💞心理學": "Psychology",
+    "🧠學習技巧": "Learning Skills",
+    "💼商務": "Business & Finance",
+    "💰理財投資": "Business & Finance",
+    "🧘‍♂️人生觀點": "Spiritual Inspiration",
+    "🧩邏輯思考": "Logical Thinking",
+    "🔬哲學科學": "Philosophy & Science",
+    "💻軟體工程": "Software Engineering",
+    "📈行銷": "Marketing",
+    "📋專案管理": "Project Management",
+}
 
 
 @dataclass
@@ -35,6 +50,11 @@ class Settings:
     # RESYNC_HIGHLIGHTS：空=停用；"all"=全部；否則為書名子字串清單。
     # 符合的已匯出書籍會刪除同步產生的 block 後重建劃線內容。
     resync_highlights: List[str] = field(default_factory=list)
+    # READING_LIST_PAGES：空=停用；"all"=全部；否則為書名子字串清單（語法同 RESYNC_HIGHLIGHTS）。
+    # 命中的書會在同步後補完「同步自動建立」的 Reading List 書頁。
+    reading_list_pages: List[str] = field(default_factory=list)
+    # 選填：Google Books API key（書封的第二來源；不帶 key 會吃全球共用配額）
+    google_books_api_key: Optional[str] = None
 
     @classmethod
     def from_env(cls) -> 'Settings':
@@ -67,6 +87,8 @@ class Settings:
                 os.getenv("ZETTELKASTEN_TAG_CATEGORIES")
             ),
             resync_highlights=cls._parse_resync(os.getenv("RESYNC_HIGHLIGHTS")),
+            reading_list_pages=cls._parse_resync(os.getenv("READING_LIST_PAGES")),
+            google_books_api_key=os.getenv("GOOGLE_BOOKS_API_KEY") or None,
         )
 
     @staticmethod
@@ -76,11 +98,18 @@ class Settings:
             return []
         return [t.strip() for t in raw.split(",") if t.strip()]
 
+    @staticmethod
+    def _title_filter_matches(filters: List[str], title: str) -> bool:
+        """書名子字串清單比對；"all" 命中全部，空清單一律不命中。"""
+        return any(t == "all" or t in title for t in filters)
+
     def resync_matches(self, title: str) -> bool:
         """此書是否需要重建劃線內容（"all" 或書名含任一子字串）。"""
-        if not self.resync_highlights:
-            return False
-        return any(t == "all" or t in title for t in self.resync_highlights)
+        return self._title_filter_matches(self.resync_highlights, title)
+
+    def reading_list_matches(self, title: str) -> bool:
+        """此書是否要補完 Reading List 書頁（語法同 resync_matches）。"""
+        return self._title_filter_matches(self.reading_list_pages, title)
 
     @staticmethod
     def _parse_tag_categories(raw: Optional[str]) -> List[str]:

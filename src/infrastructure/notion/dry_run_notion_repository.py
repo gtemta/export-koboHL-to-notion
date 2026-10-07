@@ -6,7 +6,7 @@ page_id，讓 use case 的「建立 → 重查 → 上傳」流程走得下去�
 """
 import logging
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from ...domain.entities.book import Book
 from ...domain.entities.highlight import Highlight
@@ -16,6 +16,9 @@ from .highlight_page_blocks import chapter_tree
 logger = logging.getLogger(__name__)
 
 _PREFIX = "[DRY RUN]"
+# 本輪 dry-run「建立」書籍時配發的假 page id 前綴。這些 id 只在本輪記憶體內有
+# 意義，絕不可當成真實 page id 送進任何反查（見 DryRunReadingListRepository）。
+DRY_RUN_PAGE_ID_PREFIX = "dry-run-page-"
 
 
 class DryRunNotionRepository(NotionRepository):
@@ -39,7 +42,7 @@ class DryRunNotionRepository(NotionRepository):
 
     def create_book_entry(self, title: str) -> bool:
         with self._lock:
-            fake_id = f"dry-run-page-{len(self._created) + 1}"
+            fake_id = f"{DRY_RUN_PAGE_ID_PREFIX}{len(self._created) + 1}"
             self._created[title] = fake_id
         logger.info(f"{_PREFIX} 將建立書籍 '{title}' (模擬 page_id={fake_id})")
         return True
@@ -62,5 +65,5 @@ class DryRunNotionRepository(NotionRepository):
     def update_book_metadata(self, page_id: str, book: Book) -> None:
         logger.info(f"{_PREFIX} 將更新 '{book.title}' 的元數據 (page {page_id})")
 
-    def add_book_cover(self, page_id: str, title: str, isbn: Optional[str] = None) -> None:
-        logger.info(f"{_PREFIX} 將檢查並補上 '{title}' 的封面 (page {page_id})")
+    def add_book_cover(self, page_id: str, book: Book) -> None:
+        logger.info(f"{_PREFIX} 將檢查並補上 '{book.title}' 的封面 (page {page_id})")
