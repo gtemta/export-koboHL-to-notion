@@ -257,6 +257,34 @@ class TestUpdatePage(unittest.TestCase):
         self.assertEqual(client.updates, [])
 
 
+class TestListPages(unittest.TestCase):
+    """補封面工具要逐頁寫入，需要完整、讀不完就拋錯的頁面清單（不像書名比對那份會吞錯）。"""
+
+    def test_returns_every_page_of_the_books_db(self):
+        client = _FakeClient()
+        client.query_results["books-db"] = [{"id": "p1"}, {"id": "p2"}]
+        self.assertEqual([p["id"] for p in _repo(client).list_pages()], ["p1", "p2"])
+
+    def test_no_books_database_means_no_pages(self):
+        self.assertEqual(_repo(_FakeClient(), database_id=None).list_pages(), [])
+
+    def test_a_failed_read_raises_instead_of_returning_a_partial_list(self):
+        client = _FakeClient()
+
+        def boom(database_id, **kwargs):
+            raise RuntimeError("notion down")
+
+        client.databases.query = boom
+        with self.assertRaises(RuntimeError):
+            _repo(client).list_pages()
+
+    def test_page_title_reads_the_title_property(self):
+        page = {"properties": {"Name": {"type": "title", "title": [
+            {"plain_text": "過度"}, {"plain_text": "努力 "}]}}}
+        self.assertEqual(ReadingListRepository.page_title(page), "過度努力")
+        self.assertEqual(ReadingListRepository.page_title({"properties": {}}), "")
+
+
 class TestReplaceImage(unittest.TestCase):
     """舊版寫成外部網址的圖片 block：就地改成上傳的檔案（blocks.update 不能帶 type）。"""
 

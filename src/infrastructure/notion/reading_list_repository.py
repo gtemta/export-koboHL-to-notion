@@ -143,6 +143,18 @@ class ReadingListRepository:
         bot_id = self._bot_user_id()
         return bool(creator) and creator == bot_id
 
+    def list_pages(self) -> List[dict]:
+        """Every page of the Books DB (full objects). Unlike the cached name-matching
+        list, a failed read raises: callers that write page by page need the whole list,
+        not a silently partial one."""
+        if not self._books_database_id:
+            return []
+        return self._query_all(self._books_database_id)
+
+    @staticmethod
+    def page_title(page: dict) -> str:
+        return ReadingListRepository._title_of(page)
+
     def list_blocks(self, page_id: str) -> List[dict]:
         """All top-level blocks of a page, in order."""
         blocks: List[dict] = []
