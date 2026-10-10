@@ -308,6 +308,85 @@ class TestOpenLibraryTitleSearch(unittest.TestCase):
         self.assertEqual([c for c in http.calls if c[0].startswith(_OL_SEARCH)], [])
 
 
+def _doc(title, cover_i, author, editions, subtitle=None):
+    doc = {"title": title, "cover_i": cover_i, "author_name": [author],
+           "edition_count": editions}
+    if subtitle:
+        doc["subtitle"] = subtitle
+    return doc
+
+
+class TestOpenLibraryAmbiguousTitles(unittest.TestCase):
+    """同名的書不只一本時不猜：寧可沒封面，也不要配到別本書（實測過 "Peak" 會配到小說、
+    "The C++ Programming Language" 會配到 C 語言那本）。"""
+
+    def _find(self, page_title, docs, covers=()):
+        http = _FakeHttp([_ol_search(docs)] + [_ol_cover(c) for c in covers])
+        return CoverFinder(http_get=http).find_image(Book(id="p", title=page_title))
+
+    def test_different_authors_with_the_same_title_are_not_guessed(self):
+        docs = [_doc("Peak", 1, "Roland Smith", 4), _doc("Peak", 2, "Anders Ericsson", 3)]
+        self.assertIsNone(self._find("Peak: Secrets from the New Science of Expertise",
+                                     docs, covers=(1, 2)))
+
+    def test_a_dominant_edition_count_settles_it(self):
+        docs = [_doc("Give and Take", 7, "Adam Grant", 18),
+                _doc("Give and take", 8, "Laura Dower", 1)]
+        image = self._find("Give and Take", docs, covers=(7, 8))
+        self.assertTrue(image.url.endswith("7-L.jpg?default=false"))
+
+    def test_less_than_double_is_not_dominant(self):
+        docs = [_doc("Peak Performance", 1, "Sharon Ferrett", 35),
+                _doc("Peak Performance", 2, "Erik Seversen", 18)]
+        self.assertIsNone(self._find("Peak performance", docs, covers=(1, 2)))
+
+    def test_a_winner_needs_a_minimum_number_of_editions(self):
+        docs = [_doc("Obscure", 1, "A. Writer", 5), _doc("Obscure", 2, "B. Other", 1)]
+        self.assertIsNone(self._find("Obscure", docs, covers=(1, 2)))
+
+    def test_the_same_author_listed_twice_is_not_ambiguous(self):
+        docs = [_doc("Range", 1, "David J. Epstein", 1), _doc("Range", 2, "David Epstein", 5)]
+        image = self._find("Range: Why Generalists Triumph", docs, covers=(1, 2))
+        self.assertTrue(image.url.endswith("2-L.jpg?default=false"))
+
+    def test_next_edition_of_the_winner_is_tried_when_a_cover_is_a_placeholder(self):
+        docs = [_doc("Mindset", 1, "Carol Dweck", 17), _doc("Mindset", 2, "Carol S. Dweck", 3)]
+        http = _FakeHttp([
+            _ol_search(docs),
+            (lambda u, p: u.endswith("1-L.jpg?default=false"), _Resp(size=43)),
+            _ol_cover(2),
+        ])
+        image = CoverFinder(http_get=http).find_image(Book(id="p", title="Mindset"))
+        self.assertTrue(image.url.endswith("2-L.jpg?default=false"))
+
+    def test_a_matching_subtitle_settles_it_even_with_few_editions(self):
+        docs = [_doc("Soft Skills", 1, "Other Author", 9),
+                _doc("Soft skills", 2, "John Sonmez", 3,
+                     subtitle="The software developer's life manual")]
+        image = self._find("Soft Skills: The software developer's life manual",
+                           docs, covers=(1, 2))
+        self.assertTrue(image.url.endswith("2-L.jpg?default=false"))
+
+    def test_a_different_subtitle_does_not_count_as_confirmation(self):
+        docs = [_doc("Peak", 1, "Roland Smith", 4, subtitle="A novel"),
+                _doc("Peak", 2, "Anders Ericsson", 3)]
+        self.assertIsNone(self._find("Peak: Secrets from the New Science of Expertise",
+                                     docs, covers=(1, 2)))
+
+    def test_subtitle_is_ignored_when_the_page_has_none(self):
+        docs = [_doc("Mindset", 1, "Carol Dweck", 17),
+                _doc("Mindset", 2, "Someone", 1, subtitle="A completely different book")]
+        image = self._find("Mindset", docs, covers=(1, 2))
+        self.assertTrue(image.url.endswith("1-L.jpg?default=false"))
+
+    def test_c_plus_plus_is_not_c(self):
+        docs = [_doc("The C Programming Language", 1, "Brian Kernighan", 40)]
+        self.assertIsNone(self._find("The C++ Programming Language", docs, covers=(1,)))
+        docs.append(_doc("The C++ programming language", 2, "Bjarne Stroustrup", 12))
+        self.assertTrue(self._find("The C++ Programming Language", docs, covers=(1, 2))
+                        .url.endswith("2-L.jpg?default=false"))
+
+
 class TestKoboCdnUrl(unittest.TestCase):
     def test_kobo_cdn_url_is_recognised(self):
         self.assertTrue(is_kobo_cdn_url(KOBO_CDN_URL.format(image_id="x")))

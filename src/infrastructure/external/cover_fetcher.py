@@ -9,7 +9,9 @@ Sources, first *validated* hit wins (spec 2026-09-28「封面」):
 3. Open Library by real ISBN-13 with ?default=false (404 when no cover);
 4. Open Library title search — the only source for books that are not on Kobo
    (hand-made Reading List pages have neither ImageId nor ISBN). A hit must
-   carry the same title, so another book's cover is never borrowed.
+   carry the same title, and when several different books share that title
+   it is only taken if one clearly dominates — never a guess, so another
+   book's cover is never borrowed.
 
 Every candidate is downloaded and checked, so a 1x1 placeholder can never be
 written as a "cover" again. The downloaded bytes are kept and handed on
@@ -39,6 +41,13 @@ _ISBN13 = re.compile(r"^97[89]\d{10}$")
 # 搜尋結果的書名若只是「被主書名包含」，至少要這麼長才算同一本——
 # 避免 "Give" 這種短詞命中 "Give and Take"，卻放行完整的英文書名嵌在中文書名裡的情況。
 _MIN_CONTAINED_CORE = 10
+# 同名的書有多位作者時，只在其中一本明顯勝出才採用：至少這麼多個版本，且至少是第二名的
+# 這麼多倍（實測：Give and Take 18 vs 4、Clean Code 13 vs 1 勝出；Peak 4 vs 3、
+# Peak performance 35 vs 18 分不出高下，不猜）。
+_MIN_WINNER_EDITIONS = 6
+_DOMINANCE_RATIO = 2
+# 副書名互相包含時才算「對上」；太短的字串（"a"、"the"）不具辨識力。
+_MIN_SUBTITLE_CORE = 6
 
 
 def is_real_isbn13(isbn: Optional[str]) -> bool:
@@ -66,9 +75,11 @@ def is_legacy_openlibrary_url(url: Optional[str]) -> bool:
 
 
 def _title_core(text: str) -> str:
-    """Letters/digits only — same idea as the card classifier's text core."""
+    """Letters/digits only — same idea as the card classifier's text core. '+' and
+    '#' stay: "C++" and "C#" are not "C"."""
     return "".join(
-        ch for ch in (text or "") if unicodedata.category(ch)[0] in ("L", "N")
+        ch for ch in (text or "")
+        if unicodedata.category(ch)[0] in ("L", "N") or ch in "+#"
     ).lower()
 
 
@@ -80,6 +91,45 @@ def _same_title(doc_core: str, main_core: str) -> bool:
     if doc_core == main_core:
         return True
     return len(doc_core) >= _MIN_CONTAINED_CORE and doc_core in main_core
+
+
+def _subtitle_core(title: str) -> str:
+    parts = re.split(r"[:：]", title or "", maxsplit=1)
+    return _title_core(parts[1]) if len(parts) > 1 else ""
+
+
+def _subtitle_confirms(page_subtitle: str, doc: dict) -> bool:
+    doc_subtitle = _title_core(doc.get("subtitle") or "")
+    if min(len(page_subtitle), len(doc_subtitle)) < _MIN_SUBTITLE_CORE:
+        return False
+    return page_subtitle in doc_subtitle or doc_subtitle in page_subtitle
+
+
+def _author_key(doc: dict) -> str:
+    """Surname-ish key of the first author, so "David J. Epstein" and "David Epstein"
+    are one author. Unknown authors share one key."""
+    names = doc.get("author_name") or []
+    tokens = re.findall(r"\w+", names[0].lower()) if names else []
+    return tokens[-1] if tokens else "?"
+
+
+def _editions(doc: dict) -> int:
+    return doc.get("edition_count") or 0
+
+
+def _candidate_docs(matches: List[dict]) -> Optional[List[dict]]:
+    """Same-titled Open Library docs → the ones worth trying, most editions first.
+    None when books by different authors share the title and none clearly wins."""
+    groups: Dict[str, List[dict]] = {}
+    for doc in matches:
+        groups.setdefault(_author_key(doc), []).append(doc)
+    ranked = sorted(groups.values(), key=lambda g: -max(_editions(d) for d in g))
+    if len(ranked) > 1:
+        top = max(_editions(d) for d in ranked[0])
+        second = max(_editions(d) for d in ranked[1])
+        if top < _MIN_WINNER_EDITIONS or top < _DOMINANCE_RATIO * second:
+            return None
+    return sorted(ranked[0], key=lambda d: -_editions(d))
 
 
 @dataclass(frozen=True)
@@ -209,7 +259,8 @@ class CoverFinder:
         main_core = _title_core(main)
         if not main_core:
             return None
-        params = {"title": main, "limit": 5, "fields": "title,cover_i"}
+        params = {"title": main, "limit": 10,
+                  "fields": "title,subtitle,cover_i,author_name,edition_count"}
         try:
             response = self._http_get(_OPEN_LIBRARY_SEARCH_URL, params=params,
                                       timeout=_TIMEOUT)
@@ -219,11 +270,20 @@ class CoverFinder:
         except (requests.RequestException, ValueError) as e:
             logger.debug(f"Open Library 搜尋失敗: {type(e).__name__}")
             return None
-        for doc in docs:
-            cover_id = doc.get("cover_i")
-            doc_core = _title_core(doc.get("title", ""))
-            if not cover_id or not doc_core or not _same_title(doc_core, main_core):
-                continue
+        matches = [doc for doc in docs if doc.get("cover_i")
+                   and _same_title(_title_core(doc.get("title", "")), main_core)
+                   and _title_core(doc.get("title", ""))]
+        if not matches:
+            return None
+        # 頁名帶副書名、而 Open Library 也有登記副書名時，副書名對得上的才是同一本
+        page_subtitle = _subtitle_core(book.title)
+        confirmed = [d for d in matches if _subtitle_confirms(page_subtitle, d)]
+        candidates = _candidate_docs(confirmed or matches)
+        if candidates is None:
+            logger.info(f"'{book.title}' 在 Open Library 有多本同名的書、分不出是哪一本，不猜")
+            return None
+        for doc in candidates:
+            cover_id = doc["cover_i"]
             image = self._fetch_image(
                 _OPEN_LIBRARY_COVER_URL.format(cover_id=cover_id), "openlibrary-search")
             if image:
