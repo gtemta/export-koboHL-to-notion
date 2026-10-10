@@ -8,6 +8,8 @@ from src.domain.entities.book import Book
 from src.infrastructure.external.cover_fetcher import (
     KOBO_CDN_URL,
     CoverFinder,
+    CoverImage,
+    is_kobo_cdn_url,
     is_legacy_openlibrary_url,
     is_real_isbn13,
 )
@@ -185,3 +187,129 @@ class TestHelpers(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+_OL_SEARCH = "https://openlibrary.org/search.json"
+
+
+def _ol_search(docs):
+    return (lambda u, p: u.startswith(_OL_SEARCH),
+            _Resp(ctype="application/json", payload={"docs": docs}))
+
+
+def _ol_cover(cover_i):
+    return (lambda u, p: u == f"https://covers.openlibrary.org/b/id/{cover_i}-L.jpg?default=false",
+            _Resp())
+
+
+class TestFindImage(unittest.TestCase):
+    """下載到的圖片本身（bytes）也要交出去——上傳到 Notion 用的是這份，不是網址。"""
+
+    def test_returns_downloaded_bytes_and_source(self):
+        http = _FakeHttp([(lambda u, p: u.startswith("https://cdn.kobo.com/"),
+                           _Resp(size=5000))])
+        image = CoverFinder(http_get=http).find_image(_book())
+        self.assertIsInstance(image, CoverImage)
+        self.assertEqual(image.url, KOBO_CDN_URL.format(image_id="img-1"))
+        self.assertEqual(image.content_type, "image/jpeg")
+        self.assertEqual(image.data, b"x" * 5000)
+        self.assertEqual(image.source, "kobo")
+        self.assertEqual(len(http.calls), 1)
+
+    def test_find_and_find_image_share_one_download(self):
+        http = _FakeHttp([(lambda u, p: u.startswith("https://cdn.kobo.com/"), _Resp())])
+        finder = CoverFinder(http_get=http)
+        url = finder.find(_book())
+        image = finder.find_image(_book())
+        self.assertEqual(url, image.url)
+        self.assertEqual(len(http.calls), 1)
+
+    def test_no_cover_anywhere_is_none(self):
+        self.assertIsNone(CoverFinder(http_get=_FakeHttp([])).find_image(
+            _book(image_id=None, isbn=None)))
+
+
+class TestOpenLibraryTitleSearch(unittest.TestCase):
+    """手動建立、不在 Kobo 的書沒有 ImageId／ISBN，只剩書名可查。"""
+
+    def _plain(self, title):
+        return Book(id="page-1", title=title)
+
+    def test_exact_main_title_hit(self):
+        http = _FakeHttp([
+            _ol_search([{"title": "Clean Code", "cover_i": 8065615}]),
+            _ol_cover(8065615),
+        ])
+        image = CoverFinder(http_get=http).find_image(
+            self._plain("Clean Code: A Handbook of Agile Software Craftsmanship"))
+        self.assertEqual(image.url,
+                         "https://covers.openlibrary.org/b/id/8065615-L.jpg?default=false")
+        self.assertEqual(image.source, "openlibrary-search")
+        search = [c for c in http.calls if c[0].startswith(_OL_SEARCH)][0]
+        self.assertEqual(search[1]["title"], "Clean Code")
+
+    def test_similar_but_different_title_is_rejected(self):
+        http = _FakeHttp([
+            _ol_search([{"title": "Clean Code in Python", "cover_i": 1},
+                        {"title": "Clean Coder", "cover_i": 2}]),
+            _ol_cover(1), _ol_cover(2),
+        ])
+        self.assertIsNone(CoverFinder(http_get=http).find_image(
+            self._plain("Clean Code: A Handbook")))
+
+    def test_skips_docs_without_cover_and_takes_next_match(self):
+        http = _FakeHttp([
+            _ol_search([{"title": "Mindset"},
+                        {"title": "Mindset", "cover_i": 746414}]),
+            _ol_cover(746414),
+        ])
+        image = CoverFinder(http_get=http).find_image(
+            self._plain("Mindset: The New Psychology of Success"))
+        self.assertTrue(image.url.endswith("746414-L.jpg?default=false"))
+
+    def test_punctuation_and_case_do_not_matter(self):
+        http = _FakeHttp([
+            _ol_search([{"title": "Thinking, fast and slow", "cover_i": 13290711}]),
+            _ol_cover(13290711),
+        ])
+        self.assertIsNotNone(CoverFinder(http_get=http).find_image(
+            self._plain("Thinking, Fast and Slow")))
+
+    def test_long_english_title_inside_mixed_script_title(self):
+        http = _FakeHttp([
+            _ol_search([{"title": "The innovator's dilemma", "cover_i": 77}]),
+            _ol_cover(77),
+        ])
+        self.assertIsNotNone(CoverFinder(http_get=http).find_image(
+            self._plain("創新的兩難 The Innovator’s Dilemma: When New Technologies")))
+
+    def test_short_title_inside_longer_one_is_not_enough(self):
+        http = _FakeHttp([_ol_search([{"title": "Give", "cover_i": 5}]), _ol_cover(5)])
+        self.assertIsNone(CoverFinder(http_get=http).find_image(
+            self._plain("Give and Take")))
+
+    def test_search_failure_is_not_fatal(self):
+        def boom(url, params=None, timeout=None):
+            raise requests.ConnectionError("down")
+        self.assertIsNone(CoverFinder(http_get=boom).find_image(self._plain("Clean Code")))
+
+    def test_placeholder_image_rejected(self):
+        http = _FakeHttp([
+            _ol_search([{"title": "Clean Code", "cover_i": 9}]),
+            (lambda u, p: u.startswith("https://covers.openlibrary.org/b/id/"),
+             _Resp(size=43)),
+        ])
+        self.assertIsNone(CoverFinder(http_get=http).find_image(self._plain("Clean Code")))
+
+    def test_not_tried_when_a_better_source_hit(self):
+        http = _FakeHttp([(lambda u, p: u.startswith("https://cdn.kobo.com/"), _Resp())])
+        CoverFinder(http_get=http).find_image(_book())
+        self.assertEqual([c for c in http.calls if c[0].startswith(_OL_SEARCH)], [])
+
+
+class TestKoboCdnUrl(unittest.TestCase):
+    def test_kobo_cdn_url_is_recognised(self):
+        self.assertTrue(is_kobo_cdn_url(KOBO_CDN_URL.format(image_id="x")))
+        self.assertFalse(is_kobo_cdn_url("https://covers.openlibrary.org/b/id/1-L.jpg"))
+        self.assertFalse(is_kobo_cdn_url(None))
+        self.assertFalse(is_kobo_cdn_url(""))
