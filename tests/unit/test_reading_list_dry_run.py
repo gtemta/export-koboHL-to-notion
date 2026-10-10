@@ -5,9 +5,13 @@ from src.application.use_cases.complete_reading_list_page_use_case import (
     CompleteReadingListPageUseCase,
 )
 from src.config.settings import Settings
+from src.domain.entities.book import Book
 from src.infrastructure.container import build_use_case
+from src.infrastructure.external.cover_fetcher import CoverImage
+from src.infrastructure.notion.cover_uploader import CoverUploader
 from src.infrastructure.notion.dry_run_notion_repository import DRY_RUN_PAGE_ID_PREFIX
 from src.infrastructure.notion.dry_run_reading_list_repository import (
+    DryRunCoverUploader,
     DryRunNotionViewsClient,
     DryRunReadingListRepository,
 )
@@ -38,8 +42,11 @@ class _Inner:
         self.writes.append("append")
         return []
 
-    def update_page(self, page_id, properties=None, cover_url=None, icon_url=None):
+    def update_page(self, page_id, properties=None, cover_file_id=None, icon_file_id=None):
         self.writes.append("update")
+
+    def replace_image(self, block_id, file_id):
+        self.writes.append("replace_image")
 
     def data_source_id(self, database_id):
         return "ds-1"
@@ -57,7 +64,8 @@ class TestDryRunReadingList(unittest.TestCase):
             "src.infrastructure.notion.dry_run_reading_list_repository", level="INFO"
         ):
             created = repo.append_blocks("rl-1", [{"type": "heading_2"}])
-            repo.update_page("rl-1", cover_url="https://c/x.jpg")
+            repo.update_page("rl-1", cover_file_id="file-1")
+            repo.replace_image("blk-1", "file-1")
         self.assertEqual(inner.writes, [])
         self.assertEqual(created[0]["type"], "heading_2")
         self.assertTrue(created[0]["id"].startswith("dry-run-"))
@@ -85,6 +93,51 @@ class TestDryRunReadingList(unittest.TestCase):
             self.assertIsNone(views.create_card_gallery("rl-1", "cards", "rl-1", "h-1"))
         self.assertEqual(inner.writes, [])
         self.assertEqual(views.data_source_id("cards"), "ds-1")
+
+
+class _Finder:
+    def __init__(self, image):
+        self.image = image
+        self.calls = 0
+
+    def find_image(self, book):
+        self.calls += 1
+        return self.image
+
+
+class _InnerUploader:
+    def __init__(self, image):
+        self.finder = _Finder(image)
+        self.uploads = 0
+
+    def upload(self, book):
+        self.uploads += 1
+        return "real-file-id"
+
+
+_IMAGE = CoverImage(url="https://cdn.kobo.com/x.jpg", content_type="image/jpeg",
+                    data=b"x" * 5000, source="kobo")
+
+
+class TestDryRunCoverUploader(unittest.TestCase):
+    """預覽時照常查封面（讀取），但絕不真的上傳給 Notion。"""
+
+    def test_never_uploads_but_reports_a_fake_id_when_a_cover_exists(self):
+        inner = _InnerUploader(_IMAGE)
+        uploader = DryRunCoverUploader(inner)
+        with self.assertLogs(
+            "src.infrastructure.notion.dry_run_reading_list_repository", level="INFO"
+        ) as logs:
+            file_id = uploader.upload(Book(id="b1", title="多巴胺國度"))
+        self.assertEqual(inner.uploads, 0)
+        self.assertEqual(inner.finder.calls, 1)
+        self.assertTrue(file_id.startswith("dry-run-"))
+        self.assertTrue(any("多巴胺國度" in line and "[DRY RUN]" in line for line in logs.output))
+
+    def test_no_cover_means_none_and_no_log(self):
+        inner = _InnerUploader(None)
+        self.assertIsNone(DryRunCoverUploader(inner).upload(Book(id="b1", title="書")))
+        self.assertEqual(inner.uploads, 0)
 
 
 class TestFindPageDryRunSourceId(unittest.TestCase):
@@ -120,6 +173,16 @@ class TestContainerWiring(unittest.TestCase):
         uc = build_use_case(self._settings(dry_run=True))
         self.assertIsInstance(uc.page_use_case._reading_list, DryRunReadingListRepository)
         self.assertIsInstance(uc.page_use_case._views, DryRunNotionViewsClient)
+
+    def test_dry_run_never_uploads_covers(self):
+        uc = build_use_case(self._settings(dry_run=True))
+        self.assertIsInstance(uc.page_use_case._cover_uploader, DryRunCoverUploader)
+
+    def test_real_run_uploads_covers_and_both_cover_steps_share_one_uploader(self):
+        """劃線頁與書頁補完共用同一個 uploader：同一本書本輪只上傳一次。"""
+        uc = build_use_case(self._settings())
+        self.assertIsInstance(uc.page_use_case._cover_uploader, CoverUploader)
+        self.assertIs(uc.notion_repo._cover_uploader, uc.page_use_case._cover_uploader)
 
     def test_disabled_by_default(self):
         uc = build_use_case(self._settings(reading_list_pages=[]))

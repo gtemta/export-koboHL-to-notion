@@ -7,7 +7,7 @@ block construction and section lookup so both stay unit-testable.
 from typing import Any, Dict, List, Optional, Tuple
 
 from ...domain.entities.book import Book
-from ..external.cover_fetcher import is_real_isbn13
+from ..external.cover_fetcher import is_kobo_cdn_visual, is_real_isbn13
 from .highlight_page_blocks import heading_block, split_rich_text
 from .text_utils import clean_html
 
@@ -26,23 +26,25 @@ HIGHLIGHTS_LINK_TEXT = "畫線重點 → "
 _HEADING_LEVELS = {"heading_1": 1, "heading_2": 2, "heading_3": 3}
 
 
-def skeleton_blocks(book: Book, cover_url: Optional[str],
+def skeleton_blocks(book: Book, cover_file_id: Optional[str],
                     kobo_page_id: Optional[str]) -> List[Dict[str, Any]]:
-    """The whole six-section layout, written once onto a blank page."""
+    """The whole six-section layout, written once onto a blank page.
+
+    `cover_file_id` is a Notion file_upload id (see CoverUploader), not a URL."""
     blocks: List[Dict[str, Any]] = [heading_block(SECTION_BOOK_INFO, level=2)]
-    blocks += book_info_blocks(book, cover_url)
+    blocks += book_info_blocks(book, cover_file_id)
     blocks += [heading_block(name, level=2) for name in SECTIONS[1:]]
     if kobo_page_id:
         blocks.append(highlights_link_block(kobo_page_id))
     return blocks
 
 
-def book_info_blocks(book: Book, cover_url: Optional[str]) -> List[Dict[str, Any]]:
+def book_info_blocks(book: Book, cover_file_id: Optional[str]) -> List[Dict[str, Any]]:
     """書籍資料段：書封圖（gallery 預覽靠它）、作者／出版社／ISBN、出版社簡介。"""
     blocks: List[Dict[str, Any]] = []
-    if cover_url:
-        blocks.append({"object": "block", "type": "image",
-                       "image": {"type": "external", "external": {"url": cover_url}}})
+    if cover_file_id:
+        blocks.append({"object": "block", "type": "image", "image": {
+            "type": "file_upload", "file_upload": {"id": cover_file_id}}})
     facts = [("作者", book.author), ("出版社", book.publisher)]
     if is_real_isbn13(book.isbn):
         facts.append(("ISBN", book.isbn.strip()))
@@ -104,6 +106,21 @@ def find_section(blocks: List[Dict[str, Any]], name: str
 
 def section_is_empty(body: List[Dict[str, Any]]) -> bool:
     return is_blank_page(body)
+
+
+def find_unusable_cover_image(blocks: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """書籍資料段裡舊版寫下的 Kobo 圖床圖片 block。Kobo 的 CDN 會擋 Notion 的伺服器，
+    這種外部圖片在 Notion 裡一律顯示「Permission denied」，要就地換成上傳的書封。
+    使用者自己貼的外部圖片、已上傳的圖片都不算。"""
+    section = find_section(blocks, SECTION_BOOK_INFO)
+    if section is None:
+        return None
+    for block in section[1]:
+        if block.get("type") != "image":
+            continue
+        if is_kobo_cdn_visual(block.get("image")):
+            return block
+    return None
 
 
 def _bullet(text: str) -> Dict[str, Any]:

@@ -9,6 +9,7 @@ from src.infrastructure.notion.reading_list_page_blocks import (
     SECTIONS,
     block_text,
     find_section,
+    find_unusable_cover_image,
     is_blank_page,
     section_is_empty,
     skeleton_blocks,
@@ -34,14 +35,16 @@ def _full_book():
 
 class TestSkeleton(unittest.TestCase):
     def test_sections_in_template_order(self):
-        blocks = skeleton_blocks(_full_book(), "https://cdn/x.jpg", "kobo-1")
+        blocks = skeleton_blocks(_full_book(), "file-1", "kobo-1")
         headings = [block_text(b) for b in blocks if b["type"] == "heading_2"]
         self.assertEqual(headings, list(SECTIONS))
 
     def test_book_info_contents(self):
-        blocks = skeleton_blocks(_full_book(), "https://cdn/x.jpg", "kobo-1")
+        blocks = skeleton_blocks(_full_book(), "file-1", "kobo-1")
         self.assertEqual(blocks[1]["type"], "image")
-        self.assertEqual(blocks[1]["image"]["external"]["url"], "https://cdn/x.jpg")
+        # 書封是上傳到 Notion 的檔案，不是外部網址（Kobo 圖床會擋 Notion 的伺服器）
+        self.assertEqual(blocks[1]["image"],
+                         {"type": "file_upload", "file_upload": {"id": "file-1"}})
         bullets = [block_text(b) for b in blocks if b["type"] == "bulleted_list_item"]
         self.assertEqual(bullets, ["作者：安娜．蘭布克", "出版社：方舟文化", "ISBN：9786267195185"])
         toggle = next(b for b in blocks if b["type"] == "toggle")
@@ -103,3 +106,37 @@ class TestCleanHtml(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _image(url=None, kind="external", block_id="img-1"):
+    payload = ({"type": "external", "external": {"url": url}} if kind == "external"
+               else {"type": "file", "file": {"url": "https://prod-files/x"}})
+    return {"type": "image", "id": block_id, "image": payload}
+
+
+KOBO = "https://cdn.kobo.com/book-images/img-1/353/569/90/False/image.jpg"
+
+
+class TestUnusableCoverImage(unittest.TestCase):
+    """舊版把 Kobo 圖床網址直接寫成圖片 block；Notion 讀不到，要找出來就地換掉。"""
+
+    def test_finds_kobo_cdn_image_in_book_info_section(self):
+        image = _image(KOBO)
+        blocks = [_heading("書籍資料"), image, _heading("筆記圖")]
+        self.assertIs(find_unusable_cover_image(blocks), image)
+
+    def test_uploaded_image_is_fine(self):
+        blocks = [_heading("書籍資料"), _image(kind="file"), _heading("筆記圖")]
+        self.assertIsNone(find_unusable_cover_image(blocks))
+
+    def test_user_pasted_external_image_is_left_alone(self):
+        blocks = [_heading("書籍資料"), _image("https://example.com/my-cover.jpg")]
+        self.assertIsNone(find_unusable_cover_image(blocks))
+
+    def test_only_the_book_info_section_is_searched(self):
+        blocks = [_heading("書籍資料"), _heading("筆記圖"), _image(KOBO)]
+        self.assertIsNone(find_unusable_cover_image(blocks))
+
+    def test_no_book_info_section(self):
+        self.assertIsNone(find_unusable_cover_image([_image(KOBO)]))
+        self.assertIsNone(find_unusable_cover_image([]))

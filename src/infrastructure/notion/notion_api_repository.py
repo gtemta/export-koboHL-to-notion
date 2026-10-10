@@ -9,7 +9,8 @@ from notion_client.errors import APIResponseError
 from ...domain.entities.book import Book
 from ...domain.entities.highlight import Highlight
 from ...domain.repositories.notion_repository import NotionRepository
-from ..external.cover_fetcher import CoverFinder, is_legacy_openlibrary_url
+from ..external.cover_fetcher import CoverFinder, is_kobo_cdn_visual, is_legacy_openlibrary_url
+from .cover_uploader import CoverUploader, file_upload_ref
 from .highlight_page_blocks import (
     PAGE_TITLE,
     chapter_children,
@@ -42,11 +43,16 @@ class NotionApiRepository(NotionRepository):
 
     def __init__(self, token: str, database_id: str,
                  rate_limiter: Optional[NotionRateLimiter] = None,
-                 cover_finder: Optional[CoverFinder] = None):
+                 cover_finder: Optional[CoverFinder] = None,
+                 cover_uploader: Optional[CoverUploader] = None):
         self._database_id = database_id
         self._client = Client(auth=token)
         self._rate_limiter = rate_limiter or NotionRateLimiter()
-        self._cover_finder = cover_finder or CoverFinder()
+        # 封面一律上傳給 Notion（Kobo 圖床會擋 Notion 的伺服器，外部網址顯示 Permission denied）
+        self._cover_uploader = cover_uploader or CoverUploader(
+            token, cover_finder or CoverFinder(),
+            rate_limiter=self._rate_limiter, client=self._client)
+        self._cover_finder = self._cover_uploader.finder
 
     # ----- NotionRepository interface -----
 
@@ -129,21 +135,27 @@ class NotionApiRepository(NotionRepository):
         visuals = self._existing_visuals(page_id)
         if visuals is None:
             return  # 讀取失敗：不知道目前狀態，寧可什麼都不寫也不要瞎覆蓋
-        if visuals and not self._all_broken_legacy(visuals):
+        # Kobo 圖床網址是我們舊版寫的，Notion 讀不到（Permission denied）：逐欄換掉，
+        # 另一欄若是使用者自己設的不動。
+        kobo_slots = [slot for slot, visual in visuals.items() if is_kobo_cdn_visual(visual)]
+        legacy_broken = self._all_broken_legacy(list(visuals.values()))
+        if visuals and not kobo_slots and not legacy_broken:
             logger.debug(f"page {page_id} 已有封面,跳過")
             return
-        cover_url = self._cover_finder.find(book)
-        if cover_url:
+        try:
+            file_id = self._cover_uploader.upload(book)
+        except Exception as e:  # noqa: BLE001 — 不寫任何東西，下次同步重試
+            logger.warning(f"'{book.title}' 封面上傳失敗（下次同步重試）: {e}")
+            return
+        if file_id:
+            slots = kobo_slots or ["icon", "cover"]
             retry_with_backoff(
                 lambda: self._client.pages.update(
-                    page_id=page_id,
-                    icon={"type": "external", "external": {"url": cover_url}},
-                    cover={"type": "external", "external": {"url": cover_url}},
-                ),
+                    page_id=page_id, **{slot: file_upload_ref(file_id) for slot in slots}),
                 self._rate_limiter,
             )
             logger.info(f"已為 '{book.title}' 設定封面")
-        elif visuals:
+        elif legacy_broken:
             retry_with_backoff(
                 lambda: self._client.pages.update(page_id=page_id, icon=None, cover=None),
                 self._rate_limiter,
@@ -204,8 +216,8 @@ class NotionApiRepository(NotionRepository):
             props["ISBN"] = {"rich_text": [{"text": {"content": book.isbn}}]}
         return props
 
-    def _existing_visuals(self, page_id: str) -> Optional[List[Dict[str, Any]]]:
-        """讀一次頁面現有的 icon／cover。回傳頁面上非空的 icon／cover 物件（0～2
+    def _existing_visuals(self, page_id: str) -> Optional[Dict[str, Dict[str, Any]]]:
+        """讀一次頁面現有的 icon／cover。回傳 {欄位名: 物件}，只含非空的欄位（0～2
         個）——保留原始物件而非只取 URL，因為 emoji／file 等其他型別也要能被
         `_all_broken_legacy` 判斷為「不是舊 Open Library 網址」而信任。
         讀取失敗回傳 None，呼叫端據此完全不寫入、也不查 CoverFinder（不知道目前
@@ -218,13 +230,16 @@ class NotionApiRepository(NotionRepository):
         except Exception as e:
             logger.warning(f"查詢封面狀態失敗: {e}")
             return None
-        return [page[key] for key in ("icon", "cover") if isinstance(page.get(key), dict)]
+        return {key: page[key] for key in ("icon", "cover") if isinstance(page.get(key), dict)}
 
     def _all_broken_legacy(self, visuals: List[Dict[str, Any]]) -> bool:
         """只有在既有的 icon／cover 全部都是「舊 Open Library 網址」且目前都驗證
         失效時才回真。只要有一個不是舊 OL 網址（emoji、custom_emoji、file、或已經
         修好帶 default=false 的 external），或有一個舊 OL 網址仍然有效，就視為
-        可信任、`add_book_cover` 不會覆蓋（規格「其他既有封面一律信任」）。"""
+        可信任、`add_book_cover` 不會覆蓋（規格「其他既有封面一律信任」）。
+        沒有任何 icon／cover 時回假（那是「沒封面」，不是「壞封面」）。"""
+        if not visuals:
+            return False
         for visual in visuals:
             if visual.get("type") != "external":
                 return False

@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 
 from notion_client import Client
 
+from .cover_uploader import file_upload_ref
 from .rate_limiter import NotionRateLimiter
 from .retry_policy import retry_with_backoff
 
@@ -42,16 +43,16 @@ _MAX_CHILDREN_PER_REQUEST = 100
 _UNSET = object()
 
 
-def describe_page_update(properties: Optional[Dict[str, Any]], cover_url: Optional[str],
-                         icon_url: Optional[str]) -> str:
+def describe_page_update(properties: Optional[Dict[str, Any]], cover_file_id: Optional[str],
+                         icon_file_id: Optional[str]) -> str:
     """「這次 update_page 動了什麼」的一行描述，真實 log 與 DRY_RUN 共用同一份，
     格式不會因為兩邊各寫一次而漂移（例如 f"屬性 Type 書籍種類、cover、icon"）。"""
     parts = []
     if properties:
         parts.append(f"屬性 {'、'.join(properties)}")
-    if cover_url:
+    if cover_file_id:
         parts.append("cover")
-    if icon_url:
+    if icon_file_id:
         parts.append("icon")
     return "、".join(parts)
 
@@ -185,25 +186,37 @@ class ReadingListRepository:
         self,
         page_id: str,
         properties: Optional[dict] = None,
-        cover_url: Optional[str] = None,
-        icon_url: Optional[str] = None,
+        cover_file_id: Optional[str] = None,
+        icon_file_id: Optional[str] = None,
     ) -> None:
-        """One pages.update carrying whatever was given; no-op when empty."""
+        """One pages.update carrying whatever was given; no-op when empty.
+        Cover/icon are Notion file_upload ids, not URLs."""
         kwargs: dict = {"page_id": page_id}
         if properties:
             kwargs["properties"] = properties
-        if cover_url:
-            kwargs["cover"] = {"type": "external", "external": {"url": cover_url}}
-        if icon_url:
-            kwargs["icon"] = {"type": "external", "external": {"url": icon_url}}
+        if cover_file_id:
+            kwargs["cover"] = file_upload_ref(cover_file_id)
+        if icon_file_id:
+            kwargs["icon"] = file_upload_ref(icon_file_id)
         if len(kwargs) == 1:
             return
         retry_with_backoff(
             lambda: self._client.pages.update(**kwargs), self._rate_limiter
         )
         logger.info(
-            f"已更新書頁 {page_id}：{describe_page_update(properties, cover_url, icon_url)}"
+            f"已更新書頁 {page_id}："
+            f"{describe_page_update(properties, cover_file_id, icon_file_id)}"
         )
+
+    def replace_image(self, block_id: str, file_id: str) -> None:
+        """就地把一個圖片 block 換成上傳的檔案（保留位置，不必刪了再插）。
+        blocks.update 的圖片內容不能帶 type 欄。"""
+        retry_with_backoff(
+            lambda: self._client.blocks.update(
+                block_id=block_id, image={"file_upload": {"id": file_id}}),
+            self._rate_limiter,
+        )
+        logger.info(f"已把圖片 block {block_id} 換成上傳的書封")
 
     def type_page_ids(self, names: List[str]) -> Dict[str, str]:
         """書籍種類名稱 → 種類庫的頁 id（只回傳找得到的名稱）。"""

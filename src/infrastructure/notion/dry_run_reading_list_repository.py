@@ -14,6 +14,7 @@ from .reading_list_repository import describe_page_update
 logger = logging.getLogger(__name__)
 
 _PREFIX = "[DRY RUN]"
+DRY_RUN_FILE_ID = "dry-run-file-upload"
 
 
 class DryRunReadingListRepository:
@@ -59,10 +60,33 @@ class DryRunReadingListRepository:
         return created
 
     def update_page(self, page_id: str, properties: Optional[dict] = None,
-                    cover_url: Optional[str] = None, icon_url: Optional[str] = None) -> None:
-        description = describe_page_update(properties, cover_url, icon_url)
+                    cover_file_id: Optional[str] = None,
+                    icon_file_id: Optional[str] = None) -> None:
+        description = describe_page_update(properties, cover_file_id, icon_file_id)
         if description:
             logger.info(f"{_PREFIX} 將更新書頁 {page_id}：{description}")
+
+    def replace_image(self, block_id: str, file_id: str) -> None:
+        logger.info(f"{_PREFIX} 將把圖片 block {block_id} 換成上傳的書封")
+
+
+class DryRunCoverUploader:
+    """預覽時照常查封面（下載驗證是讀取），但絕不真的上傳給 Notion。有封面時
+    回傳假的 file_upload id，讓後續步驟照真實流程走、log 呈現完整計畫。"""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    @property
+    def finder(self):
+        return self._inner.finder
+
+    def upload(self, book) -> Optional[str]:
+        image = self._inner.finder.find_image(book)
+        if image is None:
+            return None
+        logger.info(f"{_PREFIX} 將把 '{book.title}' 的封面上傳到 Notion（來源 {image.source}）")
+        return DRY_RUN_FILE_ID
 
 
 class DryRunNotionViewsClient:

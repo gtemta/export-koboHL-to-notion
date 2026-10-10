@@ -14,7 +14,7 @@ per run.
 import logging
 import threading
 import time
-from typing import Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from notion_client import Client
 
@@ -32,6 +32,11 @@ _EXTENSIONS = {
     "image/gif": ".gif",
     "image/webp": ".webp",
 }
+
+
+def file_upload_ref(file_id: str) -> Dict[str, Any]:
+    """Page cover/icon pointing at a file uploaded to Notion."""
+    return {"type": "file_upload", "file_upload": {"id": file_id}}
 
 
 class CoverUploader:

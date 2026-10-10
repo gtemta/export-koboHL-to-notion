@@ -53,6 +53,12 @@ def is_kobo_cdn_url(url: Optional[str]) -> bool:
     return bool(url) and "cdn.kobo.com/book-images/" in url
 
 
+def is_kobo_cdn_visual(visual: Optional[dict]) -> bool:
+    """A Notion cover/icon/image payload that is an external Kobo-CDN URL."""
+    return bool(visual) and visual.get("type") == "external" and is_kobo_cdn_url(
+        (visual.get("external") or {}).get("url"))
+
+
 def is_legacy_openlibrary_url(url: Optional[str]) -> bool:
     """Open Library URLs written before validation existed: they answer with a
     1x1 placeholder instead of 404 when the book has no cover."""

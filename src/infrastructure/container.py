@@ -12,8 +12,10 @@ from ..application.use_cases.sync_books_use_case import SyncBooksUseCase
 from ..config.settings import DEFAULT_BOOK_TYPE_MAPPING, Settings
 from ..domain.services.chapter_extractor import ChapterExtractor
 from .external.cover_fetcher import CoverFinder
+from .notion.cover_uploader import CoverUploader
 from .notion.dry_run_notion_repository import DryRunNotionRepository
 from .notion.dry_run_reading_list_repository import (
+    DryRunCoverUploader,
     DryRunNotionViewsClient,
     DryRunReadingListRepository,
 )
@@ -29,19 +31,23 @@ from .persistence.kobo_sqlite_repository import KoboSqliteRepository
 def build_use_case(settings: Settings) -> SyncBooksUseCase:
     logger = logging.getLogger(__name__)
     book_repo = KoboSqliteRepository(db_path=settings.kobo_db_path)
-    # 劃線頁與 Reading List 書頁共用一個 CoverFinder：同一本書本輪只查一次封面
+    # 劃線頁與 Reading List 書頁共用一個 CoverUploader（內含 CoverFinder）：同一本書
+    # 本輪只查一次、上傳一次封面。封面上傳給 Notion，而非寫外部網址——Kobo 圖床會擋
+    # Notion 的伺服器，外部網址在 Notion 裡是「Permission denied」。
+    # Books DB（Reading List）：卡片「來源」、書頁補完與封面上傳共用同一個限速器。
+    books_limiter = NotionRateLimiter()
     cover_finder = CoverFinder(google_api_key=settings.google_books_api_key)
+    cover_uploader = CoverUploader(
+        token=settings.notion_token, cover_finder=cover_finder, rate_limiter=books_limiter)
     notion_repo = NotionApiRepository(
         token=settings.notion_token,
         database_id=settings.notion_database_id,
-        cover_finder=cover_finder,
+        cover_uploader=cover_uploader,
     )
     if settings.dry_run:
         logger.warning("=== DRY RUN 模式：只讀取與記錄，不會寫入 Notion ===")
         notion_repo = DryRunNotionRepository(notion_repo)
     extractor = ChapterExtractor()
-    # Books DB（Reading List）：卡片「來源」與書頁補完共用同一個實例與限速器
-    books_limiter = NotionRateLimiter()
     reading_list = (
         ReadingListRepository(
             token=settings.notion_token,
@@ -62,7 +68,7 @@ def build_use_case(settings: Settings) -> SyncBooksUseCase:
             f"RESYNC_HIGHLIGHTS 啟用：{settings.resync_highlights} — "
             "符合的已匯出書籍會重建劃線內容"
         )
-    page_use_case = _build_page_use_case(settings, reading_list, cover_finder, books_limiter)
+    page_use_case = _build_page_use_case(settings, reading_list, cover_uploader, books_limiter)
     return SyncBooksUseCase(
         book_repo=book_repo,
         notion_repo=notion_repo,
@@ -110,7 +116,7 @@ def _build_card_use_case(settings: Settings,
 def _build_page_use_case(
     settings: Settings,
     reading_list: Optional[ReadingListRepository],
-    cover_finder: CoverFinder,
+    cover_uploader: CoverUploader,
     limiter: NotionRateLimiter,
 ) -> Optional[CompleteReadingListPageUseCase]:
     if not settings.reading_list_pages:
@@ -137,15 +143,17 @@ def _build_page_use_case(
         logger.warning(
             "NOTION_ZETTELKASTEN_DATABASE_ID 未設定：書頁不建卡片 gallery、不推算書籍種類")
     page_reading_list = reading_list
+    page_cover_uploader = cover_uploader
     if settings.dry_run:
         page_reading_list = DryRunReadingListRepository(reading_list)
         views = DryRunNotionViewsClient(views) if views is not None else None
+        page_cover_uploader = DryRunCoverUploader(cover_uploader)
     logger.warning(f"Reading List 書頁補完啟用：{', '.join(settings.reading_list_pages)}")
     return CompleteReadingListPageUseCase(
         reading_list=page_reading_list,
         card_repo=card_repo,
         views=views,
-        cover_finder=cover_finder,
+        cover_uploader=page_cover_uploader,
         cards_database_id=settings.notion_zettelkasten_database_id,
         type_mapping=dict(DEFAULT_BOOK_TYPE_MAPPING),
     )

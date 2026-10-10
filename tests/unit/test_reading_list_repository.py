@@ -27,11 +27,13 @@ class _FakeClient:
         self.children = {}         # block_id -> list of blocks
         self.appends = []          # kwargs of each append
         self.updates = []          # kwargs of each pages.update
+        self.block_updates = []    # kwargs of each blocks.update
         self.dbs = {}              # database_id -> retrieve() result
         self.retrieve_calls = []   # database_id of each databases.retrieve call
         self.users = SimpleNamespace(me=self._me)
         self.blocks = SimpleNamespace(
-            children=SimpleNamespace(list=self._list, append=self._append))
+            children=SimpleNamespace(list=self._list, append=self._append),
+            update=self._update_block)
         self.pages = SimpleNamespace(update=self._update, create=self._create)
         self.databases = SimpleNamespace(query=self._query, retrieve=self._retrieve)
 
@@ -56,6 +58,10 @@ class _FakeClient:
 
     def _update(self, **kwargs):
         self.updates.append(kwargs)
+        return {}
+
+    def _update_block(self, **kwargs):
+        self.block_updates.append(kwargs)
         return {}
 
     def _create(self, **kwargs):
@@ -219,13 +225,20 @@ class TestUpdatePage(unittest.TestCase):
         client = _FakeClient()
         _repo(client).update_page(
             "page-1", properties={"P": {"x": 1}},
-            cover_url="https://c/cover.jpg", icon_url="https://c/cover.jpg")
+            cover_file_id="file-1", icon_file_id="file-1")
+        # 封面是上傳到 Notion 的檔案（file_upload），不是外部網址
+        ref = {"type": "file_upload", "file_upload": {"id": "file-1"}}
         self.assertEqual(client.updates, [{
             "page_id": "page-1",
             "properties": {"P": {"x": 1}},
-            "cover": {"type": "external", "external": {"url": "https://c/cover.jpg"}},
-            "icon": {"type": "external", "external": {"url": "https://c/cover.jpg"}},
+            "cover": ref,
+            "icon": ref,
         }])
+
+    def test_cover_without_icon(self):
+        client = _FakeClient()
+        _repo(client).update_page("page-1", cover_file_id="file-1")
+        self.assertEqual(set(client.updates[0]), {"page_id", "cover"})
 
     def test_logs_info_on_success(self):
         """F4：真實寫入成功後要留下「更新了什麼」的痕跡，文字與 describe_page_update 一致。"""
@@ -233,7 +246,7 @@ class TestUpdatePage(unittest.TestCase):
         with mock.patch.object(rl_module.logger, "info") as info:
             _repo(client).update_page(
                 "page-1", properties={"Type 書籍種類": {"relation": []}},
-                cover_url="https://c/cover.jpg")
+                cover_file_id="file-1")
         self.assertTrue(any(
             "已更新書頁 page-1：屬性 Type 書籍種類、cover" in str(c)
             for c in info.call_args_list))
@@ -242,6 +255,22 @@ class TestUpdatePage(unittest.TestCase):
         client = _FakeClient()
         _repo(client).update_page("page-1")
         self.assertEqual(client.updates, [])
+
+
+class TestReplaceImage(unittest.TestCase):
+    """舊版寫成外部網址的圖片 block：就地改成上傳的檔案（blocks.update 不能帶 type）。"""
+
+    def test_updates_the_block_in_place(self):
+        client = _FakeClient()
+        _repo(client).replace_image("blk-1", "file-1")
+        self.assertEqual(client.block_updates, [
+            {"block_id": "blk-1", "image": {"file_upload": {"id": "file-1"}}}])
+
+    def test_logs_info_on_success(self):
+        client = _FakeClient()
+        with mock.patch.object(rl_module.logger, "info") as info:
+            _repo(client).replace_image("blk-1", "file-1")
+        self.assertTrue(any("blk-1" in str(c) for c in info.call_args_list))
 
 
 class TestTypePageIds(unittest.TestCase):
@@ -306,12 +335,12 @@ class TestDescribePageUpdate(unittest.TestCase):
 
     def test_cover_and_icon(self):
         self.assertEqual(
-            describe_page_update(None, "https://c/x.jpg", "https://c/x.jpg"),
+            describe_page_update(None, "file-1", "file-1"),
             "cover、icon")
 
     def test_all_three(self):
         self.assertEqual(
-            describe_page_update({"P": {}}, "https://c/x.jpg", "https://c/x.jpg"),
+            describe_page_update({"P": {}}, "file-1", "file-1"),
             "屬性 P、cover、icon")
 
     def test_nothing_is_empty_string(self):

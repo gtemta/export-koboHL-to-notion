@@ -16,8 +16,18 @@ from src.infrastructure.notion.reading_list_page_blocks import (
 )
 from src.infrastructure.notion.reading_list_repository import BOOK_TYPE_PROPERTY
 
-COVER = "https://cdn.kobo.com/book-images/img-1/353/569/90/False/image.jpg"
+FILE_ID = "file-1"  # 上傳到 Notion 的書封（file_upload id）
+KOBO_URL = "https://cdn.kobo.com/book-images/img-1/353/569/90/False/image.jpg"
+UC_LOGGER = "src.application.use_cases.complete_reading_list_page_use_case"
 BOOK = Book(id="b1", title="多巴胺國度", author="安娜．蘭布克", image_id="img-1")
+
+
+def _ext(url):
+    return {"type": "external", "external": {"url": url}}
+
+
+def _uploaded():
+    return {"type": "file", "file": {"url": "https://prod-files.example/x"}}
 
 
 def _page(cover=None, icon=None, types=None, with_type_prop=True):
@@ -37,6 +47,7 @@ class _FakeReadingList:
         self.types_available = types_available
         self.appended = []
         self.updates = []
+        self.replaced = []
 
     def find_page(self, title, source_page_id=None):
         return self.page
@@ -60,13 +71,19 @@ class _FakeReadingList:
             created.append(new)
         return created
 
-    def update_page(self, page_id, properties=None, cover_url=None, icon_url=None):
-        self.updates.append({"properties": properties, "cover_url": cover_url,
-                             "icon_url": icon_url})
-        if cover_url:
-            self.page["cover"] = {"type": "external"}
-        if icon_url:
-            self.page["icon"] = {"type": "external"}
+    def replace_image(self, block_id, file_id):
+        self.replaced.append((block_id, file_id))
+        for block in self.blocks:
+            if block.get("id") == block_id:
+                block["image"] = _uploaded()
+
+    def update_page(self, page_id, properties=None, cover_file_id=None, icon_file_id=None):
+        self.updates.append({"properties": properties, "cover_file_id": cover_file_id,
+                             "icon_file_id": icon_file_id})
+        if cover_file_id:
+            self.page["cover"] = _uploaded()
+        if icon_file_id:
+            self.page["icon"] = _uploaded()
         if properties:
             self.page["properties"].update(
                 {k: {"type": "relation", "relation": v["relation"]}
@@ -103,26 +120,31 @@ class _FakeCards:
         return list(self.cards)
 
 
-class _FakeCover:
-    def __init__(self, url=COVER):
-        self.url = url
+class _FakeUploader:
+    """None＝哪裡都找不到封面；fail＝找到了但上傳失敗。"""
+
+    def __init__(self, file_id=FILE_ID, fail=False):
+        self.file_id = file_id
+        self.fail = fail
         self.calls = 0
 
-    def find(self, book):
+    def upload(self, book):
         self.calls += 1
-        return self.url
+        if self.fail:
+            raise RuntimeError("upload down")
+        return self.file_id
 
 
 def _psych_cards():
     return [BookCard(page_id=f"c{i}", title="卡", tags=["💞心理學"]) for i in range(3)]
 
 
-def _use_case(rl, views=None, cards=None, cover=COVER, cards_db="cards-db"):
+def _use_case(rl, views=None, cards=None, cover=FILE_ID, cards_db="cards-db", uploader=None):
     return CompleteReadingListPageUseCase(
         reading_list=rl,
         card_repo=cards if cards is not None else _FakeCards(_psych_cards()),
         views=views,
-        cover_finder=_FakeCover(cover),
+        cover_uploader=uploader or _FakeUploader(cover),
         cards_database_id=cards_db,
         type_mapping=dict(DEFAULT_BOOK_TYPE_MAPPING),
     )
@@ -130,6 +152,15 @@ def _use_case(rl, views=None, cards=None, cover=COVER, cards_db="cards-db"):
 
 def _heading(text):
     return {"type": "heading_2", "id": f"h-{text}", "heading_2": {"rich_text": [{"plain_text": text}]}}
+
+
+def _user_line():
+    return {"type": "paragraph", "id": "u1",
+            "paragraph": {"rich_text": [{"plain_text": "我先寫的一行"}]}}
+
+
+def _image(image, block_id="img-1"):
+    return {"type": "image", "id": block_id, "image": image}
 
 
 class TestCompleteReadingListPage(unittest.TestCase):
@@ -141,12 +172,16 @@ class TestCompleteReadingListPage(unittest.TestCase):
         self.assertEqual(len(rl.appended), 1)
         headings = [block_text(b) for b in rl.appended[0] if b["type"] == "heading_2"]
         self.assertEqual(headings, list(SECTIONS))
+        image = next(b for b in rl.appended[0] if b["type"] == "image")
+        self.assertEqual(image["image"],
+                         {"type": "file_upload", "file_upload": {"id": FILE_ID}})
         notes_id = next(b["id"] for b in rl.blocks if block_text(b) == SECTION_NOTES)
         self.assertEqual(views.calls, [("rl-1", "cards-db", "rl-1", notes_id)])
-        self.assertIn({"properties": None, "cover_url": COVER, "icon_url": COVER}, rl.updates)
+        self.assertIn({"properties": None, "cover_file_id": FILE_ID, "icon_file_id": FILE_ID},
+                      rl.updates)
         self.assertIn(
             {"properties": {BOOK_TYPE_PROPERTY: {"relation": [{"id": "t-psy"}]}},
-             "cover_url": None, "icon_url": None},
+             "cover_file_id": None, "icon_file_id": None},
             rl.updates)
 
     def test_blank_page_logs_decision_before_writing(self):
@@ -185,8 +220,10 @@ class TestCompleteReadingListPage(unittest.TestCase):
         rl = _FakeReadingList(_page(), bot=False)
         views = _FakeViews(rl)
         cards = _FakeCards(_psych_cards())
-        _use_case(rl, views, cards).execute(BOOK, "kobo-1")
+        uploader = _FakeUploader()
+        _use_case(rl, views, cards, uploader=uploader).execute(BOOK, "kobo-1")
         self.assertEqual((rl.appended, views.calls, rl.updates, cards.calls), ([], [], [], 0))
+        self.assertEqual(uploader.calls, 0)
 
     def test_page_not_found(self):
         rl = _FakeReadingList(None)
@@ -194,24 +231,19 @@ class TestCompleteReadingListPage(unittest.TestCase):
         self.assertEqual((rl.appended, rl.updates), ([], []))
 
     def test_page_with_user_text_gets_no_skeleton(self):
-        user_line = {"type": "paragraph", "id": "u1",
-                     "paragraph": {"rich_text": [{"plain_text": "我先寫的一行"}]}}
-        rl = _FakeReadingList(_page(), blocks=[user_line])
+        rl = _FakeReadingList(_page(), blocks=[_user_line()])
         views = _FakeViews(rl)
-        with self.assertLogs(
-            "src.application.use_cases.complete_reading_list_page_use_case", level="WARNING"
-        ):
+        with self.assertLogs(UC_LOGGER, level="WARNING"):
             _use_case(rl, views).execute(BOOK, "kobo-1")
         self.assertEqual(rl.appended, [])
         self.assertEqual(views.calls, [])
-        self.assertIn({"properties": None, "cover_url": COVER, "icon_url": COVER}, rl.updates)
+        self.assertIn({"properties": None, "cover_file_id": FILE_ID, "icon_file_id": FILE_ID},
+                      rl.updates)
 
     def test_renamed_notes_heading_skips_gallery(self):
         rl = _FakeReadingList(_page(), blocks=[_heading("書籍資料"), _heading("卡片")])
         views = _FakeViews(rl)
-        with self.assertLogs(
-            "src.application.use_cases.complete_reading_list_page_use_case", level="WARNING"
-        ) as logs:
+        with self.assertLogs(UC_LOGGER, level="WARNING") as logs:
             _use_case(rl, views).execute(BOOK, "kobo-1")
         self.assertEqual(views.calls, [])
         self.assertEqual(rl.appended, [])
@@ -221,9 +253,7 @@ class TestCompleteReadingListPage(unittest.TestCase):
         rl = _FakeReadingList(_page())
         views = _FakeViews(rl, fail=True)
         use_case = _use_case(rl, views)
-        with self.assertLogs(
-            "src.application.use_cases.complete_reading_list_page_use_case", level="WARNING"
-        ):
+        with self.assertLogs(UC_LOGGER, level="WARNING"):
             use_case.execute(BOOK, "kobo-1")
         views.fail = False
         use_case.execute(BOOK, "kobo-1")
@@ -231,15 +261,16 @@ class TestCompleteReadingListPage(unittest.TestCase):
         self.assertEqual(len(rl.appended), 1)
 
     def test_existing_cover_only_icon_added(self):
-        rl = _FakeReadingList(_page(cover={"type": "external"}))
+        rl = _FakeReadingList(_page(cover=_uploaded()))
         _use_case(rl, _FakeViews(rl)).execute(BOOK, "kobo-1")
-        self.assertIn({"properties": None, "cover_url": None, "icon_url": COVER}, rl.updates)
+        self.assertIn({"properties": None, "cover_file_id": None, "icon_file_id": FILE_ID},
+                      rl.updates)
 
     def test_no_cover_means_no_image_and_no_cover_update(self):
         rl = _FakeReadingList(_page())
         _use_case(rl, _FakeViews(rl), cover=None).execute(BOOK, "kobo-1")
         self.assertNotIn("image", [b["type"] for b in rl.appended[0]])
-        self.assertFalse([u for u in rl.updates if u["cover_url"] or u["icon_url"]])
+        self.assertFalse([u for u in rl.updates if u["cover_file_id"] or u["icon_file_id"]])
 
     def test_existing_type_untouched(self):
         rl = _FakeReadingList(_page(types=[{"id": "t-mkt"}]))
@@ -250,9 +281,7 @@ class TestCompleteReadingListPage(unittest.TestCase):
 
     def test_type_name_missing_from_type_db_warns(self):
         rl = _FakeReadingList(_page(), type_ids={})
-        with self.assertLogs(
-            "src.application.use_cases.complete_reading_list_page_use_case", level="WARNING"
-        ):
+        with self.assertLogs(UC_LOGGER, level="WARNING"):
             _use_case(rl, _FakeViews(rl)).execute(BOOK, "kobo-1")
         self.assertFalse([u for u in rl.updates if u["properties"]])
 
@@ -260,7 +289,7 @@ class TestCompleteReadingListPage(unittest.TestCase):
         rl = _FakeReadingList(_page())
         views = _FakeViews(rl)
         use_case = CompleteReadingListPageUseCase(
-            reading_list=rl, card_repo=None, views=None, cover_finder=_FakeCover(),
+            reading_list=rl, card_repo=None, views=None, cover_uploader=_FakeUploader(),
             cards_database_id=None, type_mapping=dict(DEFAULT_BOOK_TYPE_MAPPING))
         use_case.execute(BOOK, "kobo-1")
         self.assertEqual(len(rl.appended), 1)
@@ -271,9 +300,7 @@ class TestCompleteReadingListPage(unittest.TestCase):
         rl = _FakeReadingList(_page())
         views = _FakeViews(rl)
         cards = _FakeCards([BookCard(page_id="c0", title="卡", tags=["🍳料理"])])
-        with self.assertLogs(
-            "src.application.use_cases.complete_reading_list_page_use_case", level="WARNING"
-        ) as logs:
+        with self.assertLogs(UC_LOGGER, level="WARNING") as logs:
             _use_case(rl, views, cards).execute(BOOK, "kobo-1")
         self.assertTrue(any("都對不到書籍種類" in line for line in logs.output))
         self.assertFalse([u for u in rl.updates if u["properties"]])
@@ -309,43 +336,125 @@ class TestCompleteReadingListPage(unittest.TestCase):
 
 
 class TestCoverLookupOnlyWhenUsable(unittest.TestCase):
-    """F5：封面只在「空白頁」或「cover／icon 缺一」時才查，省掉查了也用不到的呼叫。"""
+    """F5：封面只在「空白頁」或「cover／icon 缺一」時才查（現在還要上傳），
+    省掉查了也用不到的呼叫。"""
 
     @staticmethod
-    def _non_blank_blocks():
-        return [{"type": "paragraph", "id": "u1",
-                "paragraph": {"rich_text": [{"plain_text": "我先寫的一行"}]}}]
-
-    @staticmethod
-    def _use_case(rl, cover):
+    def _use_case(rl, uploader):
         return CompleteReadingListPageUseCase(
             reading_list=rl, card_repo=_FakeCards(_psych_cards()), views=_FakeViews(rl),
-            cover_finder=cover, cards_database_id="cards-db",
+            cover_uploader=uploader, cards_database_id="cards-db",
             type_mapping=dict(DEFAULT_BOOK_TYPE_MAPPING))
 
     def test_complete_page_skips_cover_lookup(self):
         rl = _FakeReadingList(
-            _page(cover={"type": "external"}, icon={"type": "emoji"}),
-            blocks=self._non_blank_blocks())
-        cover = _FakeCover()
-        self._use_case(rl, cover).execute(BOOK, "kobo-1")
-        self.assertEqual(cover.calls, 0)
+            _page(cover=_uploaded(), icon={"type": "emoji", "emoji": "📚"}),
+            blocks=[_user_line()])
+        uploader = _FakeUploader()
+        self._use_case(rl, uploader).execute(BOOK, "kobo-1")
+        self.assertEqual(uploader.calls, 0)
 
     def test_blank_page_looks_up_cover(self):
         rl = _FakeReadingList(_page())
-        cover = _FakeCover()
-        self._use_case(rl, cover).execute(BOOK, "kobo-1")
-        self.assertEqual(cover.calls, 1)
+        uploader = _FakeUploader()
+        self._use_case(rl, uploader).execute(BOOK, "kobo-1")
+        self.assertEqual(uploader.calls, 1)
 
     def test_non_blank_page_missing_icon_looks_up_and_writes_icon(self):
-        rl = _FakeReadingList(
-            _page(cover={"type": "external"}, icon=None),
-            blocks=self._non_blank_blocks())
-        cover = _FakeCover()
-        self._use_case(rl, cover).execute(BOOK, "kobo-1")
-        self.assertEqual(cover.calls, 1)
+        rl = _FakeReadingList(_page(cover=_uploaded(), icon=None), blocks=[_user_line()])
+        uploader = _FakeUploader()
+        self._use_case(rl, uploader).execute(BOOK, "kobo-1")
+        self.assertEqual(uploader.calls, 1)
         self.assertIn(
-            {"properties": None, "cover_url": None, "icon_url": COVER}, rl.updates)
+            {"properties": None, "cover_file_id": None, "icon_file_id": FILE_ID}, rl.updates)
+
+
+class TestUnusableKoboCdnVisuals(unittest.TestCase):
+    """Kobo 圖床會擋 Notion 的伺服器：舊版寫成外部網址的封面／icon／圖片 block 在
+    Notion 裡都是「Permission denied」，要換成上傳的書封。使用者自己換的不碰。"""
+
+    def test_kobo_cdn_cover_and_icon_are_replaced(self):
+        rl = _FakeReadingList(
+            _page(cover=_ext(KOBO_URL), icon=_ext(KOBO_URL)), blocks=[_user_line()])
+        _use_case(rl).execute(BOOK, "kobo-1")
+        self.assertIn({"properties": None, "cover_file_id": FILE_ID, "icon_file_id": FILE_ID},
+                      rl.updates)
+
+    def test_only_the_broken_slot_is_replaced(self):
+        rl = _FakeReadingList(
+            _page(cover=_ext(KOBO_URL), icon={"type": "emoji", "emoji": "📚"}),
+            blocks=[_user_line()])
+        _use_case(rl).execute(BOOK, "kobo-1")
+        self.assertIn({"properties": None, "cover_file_id": FILE_ID, "icon_file_id": None},
+                      rl.updates)
+
+    def test_user_set_cover_and_icon_are_left_alone(self):
+        rl = _FakeReadingList(
+            _page(cover=_ext("https://example.com/mine.jpg"),
+                  icon={"type": "emoji", "emoji": "📚"}),
+            blocks=[_user_line()])
+        uploader = _FakeUploader()
+        _use_case(rl, uploader=uploader).execute(BOOK, "kobo-1")
+        self.assertEqual(uploader.calls, 0)
+        self.assertFalse([u for u in rl.updates if u["cover_file_id"] or u["icon_file_id"]])
+
+    def test_broken_image_block_is_replaced_in_place(self):
+        rl = _FakeReadingList(
+            _page(cover=_uploaded(), icon=_uploaded()),
+            blocks=[_heading("書籍資料"), _image(_ext(KOBO_URL)), _heading("筆記圖")])
+        _use_case(rl).execute(BOOK, "kobo-1")
+        self.assertEqual(rl.replaced, [("img-1", FILE_ID)])
+        self.assertEqual(rl.appended, [])
+        self.assertFalse([u for u in rl.updates if u["cover_file_id"] or u["icon_file_id"]])
+
+    def test_repaired_image_block_is_not_touched_again(self):
+        rl = _FakeReadingList(
+            _page(cover=_uploaded(), icon=_uploaded()),
+            blocks=[_heading("書籍資料"), _image(_ext(KOBO_URL)), _heading("筆記圖")])
+        use_case = _use_case(rl)
+        use_case.execute(BOOK, "kobo-1")
+        use_case.execute(BOOK, "kobo-1")
+        self.assertEqual(len(rl.replaced), 1)
+
+    def test_uploaded_or_user_pasted_image_is_left_alone(self):
+        for image in (_uploaded(), _ext("https://example.com/mine.jpg")):
+            rl = _FakeReadingList(
+                _page(cover=_uploaded(), icon=_uploaded()),
+                blocks=[_heading("書籍資料"), _image(image), _heading("筆記圖")])
+            uploader = _FakeUploader()
+            _use_case(rl, uploader=uploader).execute(BOOK, "kobo-1")
+            self.assertEqual((rl.replaced, uploader.calls), ([], 0))
+
+
+class TestUploadFailure(unittest.TestCase):
+    """上傳失敗（網路、Notion 暫時拒絕）不可留下半成品，也不可拖垮整輪同步。"""
+
+    def test_blank_page_writes_nothing_so_the_cover_image_is_not_lost_for_good(self):
+        """骨架只寫在空白頁；若上傳失敗還是寫了沒有圖的骨架，頁面就不再空白，
+        書封圖永遠補不回來。所以整本書這輪跳過，下次同步重試。"""
+        rl = _FakeReadingList(_page())
+        uploader = _FakeUploader(fail=True)
+        with self.assertLogs(UC_LOGGER, level="WARNING") as logs:
+            _use_case(rl, uploader=uploader).execute(BOOK, "kobo-1")
+        self.assertTrue(any("封面上傳失敗" in line for line in logs.output))
+        self.assertEqual((rl.appended, rl.updates), ([], []))
+
+        uploader.fail = False
+        _use_case(rl, uploader=uploader).execute(BOOK, "kobo-1")
+        image = next(b for b in rl.appended[0] if b["type"] == "image")
+        self.assertEqual(image["image"]["file_upload"]["id"], FILE_ID)
+
+    def test_existing_page_still_gets_its_other_steps(self):
+        rl = _FakeReadingList(
+            _page(cover=_ext(KOBO_URL)),
+            blocks=[_heading("書籍資料"), _heading("筆記圖")])
+        views = _FakeViews(rl)
+        with self.assertLogs(UC_LOGGER, level="WARNING"):
+            _use_case(rl, views, uploader=_FakeUploader(fail=True)).execute(BOOK, "kobo-1")
+        self.assertEqual(len(views.calls), 1)
+        self.assertTrue([u for u in rl.updates if u["properties"]])
+        self.assertFalse([u for u in rl.updates if u["cover_file_id"] or u["icon_file_id"]])
+        self.assertEqual(rl.replaced, [])
 
 
 if __name__ == "__main__":

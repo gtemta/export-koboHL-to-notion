@@ -10,6 +10,7 @@ from src.infrastructure.external.cover_fetcher import (
     CoverFinder,
     CoverImage,
     is_kobo_cdn_url,
+    is_kobo_cdn_visual,
     is_legacy_openlibrary_url,
     is_real_isbn13,
 )
@@ -313,3 +314,12 @@ class TestKoboCdnUrl(unittest.TestCase):
         self.assertFalse(is_kobo_cdn_url("https://covers.openlibrary.org/b/id/1-L.jpg"))
         self.assertFalse(is_kobo_cdn_url(None))
         self.assertFalse(is_kobo_cdn_url(""))
+
+    def test_kobo_cdn_visual_is_an_external_kobo_url_only(self):
+        kobo = {"type": "external", "external": {"url": KOBO_CDN_URL.format(image_id="x")}}
+        self.assertTrue(is_kobo_cdn_visual(kobo))
+        self.assertFalse(is_kobo_cdn_visual(
+            {"type": "external", "external": {"url": "https://example.com/a.jpg"}}))
+        self.assertFalse(is_kobo_cdn_visual({"type": "file", "file": {"url": "https://x"}}))
+        self.assertFalse(is_kobo_cdn_visual({"type": "emoji", "emoji": "📚"}))
+        self.assertFalse(is_kobo_cdn_visual(None))
