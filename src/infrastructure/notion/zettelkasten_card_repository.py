@@ -22,7 +22,6 @@ Review scores are deliberately NOT written to Notion. The review gate
 has already passed, so a score column would be noise. The scores live in
 `cards_output/*.json` and the run log.
 """
-import hashlib
 import logging
 import re
 from typing import Iterator, List, Optional, Set, Tuple
@@ -33,6 +32,7 @@ from notion_client import Client
 from zettelkasten_generator import ZettelkastenCard
 
 from ...domain.entities.book_card import BookCard
+from ..persistence.card_store import card_source_id
 from .card_visuals import cover_url_for
 from .rate_limiter import NotionRateLimiter
 from .reading_list_repository import ReadingListRepository
@@ -419,16 +419,8 @@ class ZettelkastenCardRepository:
 
     @staticmethod
     def _card_source_id(card: ZettelkastenCard) -> str:
-        """Stable id for the source highlight a card came from.
-
-        Prefers the Kobo BookmarkID; falls back to a hash of the highlight text
-        so cards still dedup even when no BookmarkID is available.
-        """
-        bookmark_id = getattr(card, "source_bookmark_id", "") or ""
-        if bookmark_id.strip():
-            return bookmark_id.strip()
-        basis = (card.source_highlight or card.title or "").encode("utf-8")
-        return "sha1:" + hashlib.sha1(basis).hexdigest()[:12]
+        """Stable id for the source highlight a card came from (see card_source_id)."""
+        return card_source_id(card)
 
     @classmethod
     def _filter_new_cards(
