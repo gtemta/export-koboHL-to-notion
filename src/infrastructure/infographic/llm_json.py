@@ -5,6 +5,8 @@ from typing import Optional
 
 _THINK_BLOCK = re.compile(r"(?is)<think>.*?</think>")
 _decoder = json.JSONDecoder()
+# 一個失敗的 `{` 之後還會試下一個；惡意或失控的回應（上萬個 `{`）不該讓這裡跑到天荒地老。
+_MAX_ATTEMPTS = 50
 
 
 def parse_json_object(text: Optional[str]) -> Optional[dict]:
@@ -18,10 +20,12 @@ def parse_json_object(text: Optional[str]) -> Optional[dict]:
         return None
     cleaned = _THINK_BLOCK.sub("", text)
     start = cleaned.find("{")
-    while start != -1:
+    for _ in range(_MAX_ATTEMPTS):
+        if start == -1:
+            break
         try:
-            parsed, _ = _decoder.raw_decode(cleaned, start)
-        except ValueError:
+            parsed, _end = _decoder.raw_decode(cleaned, start)
+        except (ValueError, RecursionError):
             parsed = None
         if isinstance(parsed, dict):
             return parsed

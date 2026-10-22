@@ -20,7 +20,12 @@ from ...domain.services.infographic_rules import DEFAULT_ROLE, normalize_spec
 from ...infrastructure.infographic.html_renderer import render_infographic_html
 from ...infrastructure.infographic.spec_generator import InfographicSpecGenerator
 from ...infrastructure.persistence.book_map_store import BookMapStore
-from ...infrastructure.persistence.card_store import CardStore, SavedCard, book_slug
+from ...infrastructure.persistence.card_store import (
+    CardStore,
+    SavedCard,
+    book_slug,
+    card_source_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -143,15 +148,26 @@ class MakeCardInfographicUseCase:
 
     def _output_path(self, saved: SavedCard, book_titles: Sequence[str]) -> str:
         name = book_slug(saved.card.title)
-        if list(book_titles).count(saved.card.title) > 1:
-            # 同書標題重複：用來源劃線ID區分，跨次執行檔名也穩定
-            name += "_" + book_slug(saved.card.source_bookmark_id or saved.card.id)
+        # 同書「檔名會撞」的卡（標題相同、`a/b` 與 `a:b`、只差大小寫——Windows 不分大小寫）
+        # 一律加上來源劃線ID。判斷依據是整本書的卡而非這次勾選的卡，所以不論勾了幾張，
+        # 同一張卡跨次執行的檔名都一樣。
+        clashes = sum(1 for t in book_titles if book_slug(t).casefold() == name.casefold())
+        if clashes > 1:
+            name += "_" + book_slug(card_source_id(saved.card))
         return os.path.join(self._output_dir, book_slug(saved.book_title), f"{name}.html")
 
     @staticmethod
     def _write(path: str, html: str) -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8", newline="") as f:
-            f.write(html)
-        os.replace(tmp, path)
+        try:
+            with open(tmp, "w", encoding="utf-8", newline="") as f:
+                f.write(html)
+            os.replace(tmp, path)
+        except BaseException:
+            # 寫到一半失敗不留殘檔（重跑時殘檔會被當成「已產生過」之外的垃圾）
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise

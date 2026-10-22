@@ -26,6 +26,10 @@ class TestParseJsonObject(unittest.TestCase):
         text = '<think>先想一下 {"a": 0}</think>{"a": 2}'
         self.assertEqual(parse_json_object(text), {"a": 2})
 
+    def test_absurdly_deep_nesting_returns_none_instead_of_crashing(self):
+        self.assertIsNone(parse_json_object('{"a":' * 20000))
+        self.assertIsNone(parse_json_object("{" + '"a":[' * 5000))
+
     def test_unparseable_text_returns_none(self):
         for text in ("沒有 JSON", "{壞掉的", "", None, "[1, 2, 3]"):
             self.assertIsNone(parse_json_object(text), text)

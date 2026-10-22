@@ -82,5 +82,5 @@ class BookMapStore:
             if not set(titles) <= set(entries):
                 return None
             return str(data.get("theme") or ""), entries
-        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
             return None

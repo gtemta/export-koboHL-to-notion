@@ -193,6 +193,42 @@ class TestDegradeAndSkip(_Case):
         paths = [p for _, p in result.generated]
         self.assertEqual(len(set(paths)), len(paths))
 
+    def test_titles_whose_file_names_collide_get_distinct_files(self):
+        # `a/b` 與 `a:b` 都會變成 a_b；`Abc`／`abc` 在 Windows 是同一個檔
+        for first, second in (("a/b", "a:b"), ("Abc", "abc")):
+            with self.subTest(first=first):
+                self.write_batch("原子習慣_20260202_000000.json", BOOK,
+                                 [(first, "BM-7"), (second, "BM-8")])
+                result = self.use_case().execute(
+                    [self.marked(first, "BM-7"), self.marked(second, "BM-8")])
+                paths = [p for _, p in result.generated]
+                self.assertEqual(len(paths), 2, result.skipped)
+                self.assertEqual(len({p.lower() for p in paths}), 2)
+
+    def test_a_colliding_title_keeps_the_same_file_name_whichever_cards_are_marked(self):
+        self.write_batch("原子習慣_20260202_000000.json", BOOK, [("a/b", "BM-7"), ("a:b", "BM-8")])
+        alone = self.use_case().execute([self.marked("a:b", "BM-8")])
+        both = self.use_case().execute([self.marked("a/b", "BM-7"), self.marked("a:b", "BM-8")])
+        self.assertEqual([t for t, _ in both.generated], ["a/b"])       # a:b 已存在 → 略過
+        self.assertEqual([t for t, _ in both.skipped], ["a:b"])
+        self.assertEqual(len(alone.generated), 1)
+
+    def test_a_dot_only_book_title_cannot_write_outside_the_output_folder(self):
+        self.write_batch("點點_20260101_000000.json", "..", [("卡", "BM-5")])
+        result = self.use_case().execute([self.marked("卡", "BM-5")])
+        self.assertEqual(len(result.generated), 1)
+        path = os.path.realpath(result.generated[0][1])
+        self.assertTrue(path.startswith(os.path.realpath(self.out_dir) + os.sep), path)
+
+    def test_a_failed_replace_cleans_up_its_temp_file(self):
+        from unittest import mock
+        with mock.patch("src.application.use_cases.make_card_infographic_use_case.os.replace",
+                        side_effect=OSError("disk full")):
+            result = self.use_case().execute([self.marked()])
+        self.assertEqual(len(result.failed), 1)
+        folder = os.path.join(self.out_dir, BOOK)
+        self.assertEqual(os.listdir(folder) if os.path.isdir(folder) else [], [])
+
     def test_no_temp_files_are_left_behind(self):
         self.use_case().execute([self.marked()])
         leftovers = [f for f in os.listdir(os.path.join(self.out_dir, BOOK)) if not f.endswith(".html")]

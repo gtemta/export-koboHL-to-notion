@@ -7,7 +7,7 @@ import unittest
 
 from src.domain.entities.infographic_spec import MapEntry, Neighbor
 from src.infrastructure.persistence.book_map_store import BookMapStore
-from src.infrastructure.persistence.card_store import CardStore, card_source_id
+from src.infrastructure.persistence.card_store import CardStore, book_slug, card_source_id
 from zettelkasten_generator import ZettelkastenCard
 
 
@@ -28,6 +28,56 @@ class _StoreCase(unittest.TestCase):
         payload = {"book_title": book_title, "uploaded": uploaded, "cards": cards, **extra}
         with open(os.path.join(self.dir, filename), "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False)
+
+
+class TestBookSlug(unittest.TestCase):
+    """slug 會被拿去當資料夾／檔名：任何輸入都不得跳出目錄或在 Windows 上寫不出檔。"""
+
+    def test_dot_only_names_cannot_climb_out_of_the_folder(self):
+        for name in ("..", ".", "...", " . ", "../..", "\\.."):
+            slug = book_slug(name)
+            self.assertNotIn("/", slug, name)
+            self.assertNotIn("\\", slug, name)
+            self.assertNotIn(slug, ("..", "."), name)
+            self.assertTrue(slug.strip(". "), name)
+
+    def test_trailing_dots_and_spaces_are_dropped_even_after_the_length_cut(self):
+        for name in ("書.", "書. ", "x" * 79 + " 尾巴", "x" * 79 + ". 尾巴"):
+            slug = book_slug(name)
+            self.assertEqual(slug, slug.rstrip(". "), repr(name))
+
+    def test_windows_reserved_device_names_are_not_used_bare(self):
+        for name in ("NUL", "con", "Aux", "COM1", "lpt9", "CON.txt", "nul.tar.gz"):
+            self.assertNotEqual(book_slug(name).split(".")[0].upper(), name.split(".")[0].upper(), name)
+        self.assertEqual(book_slug("CONSOLE"), "CONSOLE")      # 只擋整個主檔名，不誤傷
+        self.assertEqual(book_slug("COM10"), "COM10")
+
+    def test_ordinary_names_are_unchanged(self):
+        self.assertEqual(book_slug("原子習慣"), "原子習慣")
+        self.assertEqual(book_slug("a/b"), "a_b")
+        self.assertEqual(book_slug("Who Moved: My Cheese?"), "Who Moved_ My Cheese_")
+        self.assertEqual(book_slug(""), "untitled")
+        self.assertEqual(book_slug(None), "untitled")
+
+
+class TestSavedCardsRobustness(_StoreCase):
+    def test_one_malformed_card_does_not_hide_its_neighbors(self):
+        bad = _card_dict("壞卡", "BM-9")
+        bad["tags"] = 5                                  # 型別錯誤
+        weird = _card_dict("怪卡", "BM-8")
+        weird["source_bookmark_id"] = 123
+        self.write("書_20260101_000000.json", "書", [_card_dict("甲", "BM-1"), bad, weird, "x"])
+        self.assertEqual([s.card.title for s in self.store.saved_cards()], ["甲"])
+
+    def test_one_malformed_file_does_not_hide_other_files(self):
+        self.write("書_20260101_000000.json", "書", [_card_dict("甲", "BM-1")])
+        with open(os.path.join(self.dir, "壞1_1.json"), "w", encoding="utf-8") as f:
+            json.dump({"book_title": "壞", "cards": 5}, f)
+        with open(os.path.join(self.dir, "壞2_1.json"), "w", encoding="utf-8") as f:
+            json.dump({"book_title": ["串列"], "cards": [_card_dict("乙", "BM-2")]}, f)
+        with open(os.path.join(self.dir, "壞3_1.json"), "w", encoding="utf-8") as f:
+            f.write("[" * 5000 + "]" * 5000)               # 深層巢狀：RecursionError
+        self.assertEqual([s.card.title for s in self.store.saved_cards()], ["甲"])
 
 
 class TestSavedCards(_StoreCase):
@@ -128,6 +178,12 @@ class TestBookMapStore(_StoreCase):
         with open(os.path.join(self.dir, "maps", "書.json"), "w", encoding="utf-8") as f:
             f.write("{oops")
         self.assertIsNone(maps.load("書", self.TITLES))
+
+    def test_deeply_nested_map_file_is_a_miss_not_a_crash(self):
+        os.makedirs(os.path.join(self.dir, "maps"))
+        with open(os.path.join(self.dir, "maps", "書.json"), "w", encoding="utf-8") as f:
+            f.write("[" * 5000 + "]" * 5000)
+        self.assertIsNone(BookMapStore(self.dir).load("書", self.TITLES))
 
     def test_save_overwrites_the_previous_map_of_the_same_book(self):
         maps = BookMapStore(self.dir)

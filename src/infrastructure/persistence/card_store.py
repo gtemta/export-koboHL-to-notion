@@ -20,10 +20,31 @@ from zettelkasten_generator import ZettelkastenCard
 logger = logging.getLogger(__name__)
 
 
+# Windows 保留的裝置名：連 `CON.txt` 這種帶副檔名的也算，不能當資料夾或檔案的主檔名。
+_RESERVED_NAMES = frozenset(
+    ["CON", "PRN", "AUX", "NUL"]
+    + [f"COM{i}" for i in range(1, 10)]
+    + [f"LPT{i}" for i in range(1, 10)]
+)
+
+
 def book_slug(book_title: str) -> str:
-    """Filesystem-safe name for a book, shared by every per-book file we write."""
-    slug = re.sub(r'[\\/:*?"<>|]+', "_", (book_title or "untitled")).strip()
-    return slug[:80] or "untitled"
+    """Filesystem-safe name for a book (or a card title), shared by every per-book
+    file we write. The result is used as a folder / file name, so it must never be
+    able to leave its parent folder or be something Windows cannot create:
+
+    - path separators and `:*?"<>|` become `_`;
+    - leading/trailing dots and spaces are dropped (`..` would climb out of the
+      folder; Windows silently strips trailing ones, so the file written is not the
+      one asked for) — re-done after the 80-char cut, which can expose a new space;
+    - reserved device names (`NUL`, `CON.txt`, ...) get a `_` suffix.
+    """
+    slug = re.sub(r'[\\/:*?"<>|]+', "_", (book_title or "untitled")).strip(" .")
+    slug = slug[:80].strip(" .") or "untitled"
+    if slug.split(".")[0].upper() in _RESERVED_NAMES:
+        stem, dot, rest = slug.partition(".")
+        slug = f"{stem}_{dot}{rest}"
+    return slug
 
 
 def card_source_id(card: ZettelkastenCard) -> str:
@@ -156,16 +177,22 @@ class CardStore:
             try:
                 with open(path, encoding="utf-8") as f:
                     data = json.load(f)
-            except (OSError, ValueError):
+            except (OSError, ValueError, RecursionError):
                 continue
             if not isinstance(data, dict):
                 continue
+            # 手動改壞的檔案只該害到自己：整檔或單張卡的結構不對就略過，不連累其他卡。
             book_title = data.get("book_title") or ""
-            for raw in data.get("cards") or []:
-                if not isinstance(raw, dict):
-                    continue
-                card = ZettelkastenCard.from_dict(raw)
-                found[(book_title, card_source_id(card))] = SavedCard(book_title, card, path)
+            cards = data.get("cards") or []
+            if not isinstance(book_title, str) or not isinstance(cards, list):
+                logger.warning(f"略過結構不符的卡片批次: {path}")
+                continue
+            for raw in cards:
+                try:
+                    card = ZettelkastenCard.from_dict(raw)
+                    found[(book_title, card_source_id(card))] = SavedCard(book_title, card, path)
+                except Exception as e:  # noqa: BLE001 — 壞掉的單張卡不該使整批查找失敗
+                    logger.warning(f"略過格式錯誤的卡片 ({path}): {e}")
         return list(found.values())
 
     def book_cards(self, book_title: str) -> List[ZettelkastenCard]:
