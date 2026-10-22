@@ -11,6 +11,10 @@ from typing import List, Sequence
 from ...domain.entities.infographic_spec import InfographicSpec, Node
 from .icon_library import icon_inner_svg
 
+# 畫布高度是固定的 1350px，沒有自動縮放；底下小地圖能佔的高度要有上限，
+# 版面預算的實測見 CLAUDE.md「卡片概念圖卡」。
+_NEIGHBOR_TITLE_CHARS = 14
+
 _ROLE_TAG = {"主軸": "全書主軸", "支柱": "支柱觀念", "案例": "案例"}
 _ROLE_ACCENT = {"主軸": "#B5532A", "支柱": "#B8895A", "案例": "#7A8F6B"}
 
@@ -25,7 +29,7 @@ _CSS = """
   .card { width: 1080px; height: 1350px; padding: 80px 72px; display: flex; flex-direction: column; }
   .tag { align-self: flex-start; font-size: 26px; font-weight: 500; color: #5C574E; background: #F1E3CF; padding: 8px 22px; border-radius: 999px; }
   .title { margin-top: 36px; font-size: 64px; font-weight: 900; line-height: 1.25; }
-  .visual { margin-top: 80px; }
+  .visual { margin-top: 56px; }
   .flow, .contrast { display: flex; align-items: center; justify-content: space-between; }
   .node { width: 250px; display: flex; flex-direction: column; align-items: center; gap: 24px; }
   .node-cap { font-size: 24px; font-weight: 500; color: ACCENT; }
@@ -35,17 +39,21 @@ _CSS = """
   .bubble.result svg { stroke: #FFFFFF; }
   .node-label { font-size: 32px; font-weight: 700; text-align: center; line-height: 1.35; }
   .arrow svg { width: 52px; height: 52px; stroke: ACCENT; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-  .side { display: flex; flex-direction: column; align-items: center; gap: 40px; }
+  .side { display: flex; flex-direction: column; align-items: flex-start; gap: 24px; }
+  .layout-contrast .node { width: auto; flex-direction: row; gap: 20px; }
+  .layout-contrast .bubble { width: 104px; height: 104px; }
+  .layout-contrast .bubble svg { width: 50px; height: 50px; }
+  .layout-contrast .node-label { font-size: 30px; text-align: left; }
   .vs { font-size: 40px; font-weight: 900; color: #FFFFFF; background: ACCENT; width: 96px; height: 96px; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
-  .stack { display: flex; flex-direction: column; gap: 28px; }
+  .stack { display: flex; flex-direction: column; gap: 14px; }
   .tier { display: flex; }
-  .layout-hierarchy .node { width: auto; flex-direction: row; gap: 28px; }
-  .layout-hierarchy .bubble { width: 120px; height: 120px; }
-  .layout-hierarchy .bubble svg { width: 56px; height: 56px; }
-  .layout-hierarchy .node-label { text-align: left; }
+  .layout-hierarchy .node { width: auto; flex-direction: row; gap: 22px; }
+  .layout-hierarchy .bubble { width: 84px; height: 84px; }
+  .layout-hierarchy .bubble svg { width: 40px; height: 40px; }
+  .layout-hierarchy .node-label { font-size: 30px; text-align: left; }
   .loopback { margin-top: 36px; display: flex; align-items: center; justify-content: center; gap: 16px; font-size: 28px; font-weight: 500; color: ACCENT; border-top: 4px dashed ACCENT; padding-top: 24px; }
   .loopback svg { width: 40px; height: 40px; stroke: ACCENT; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-  .lines { margin-top: 90px; display: flex; flex-direction: column; gap: 22px; }
+  .lines { margin-top: 56px; display: flex; flex-direction: column; gap: 18px; }
   .line { font-size: 38px; font-weight: 500; line-height: 1.5; padding-left: 28px; border-left: 8px solid ACCENT; }
   .spacer { flex: 1; }
   .map { border-top: 3px solid #E4D8C6; padding-top: 30px; }
@@ -121,6 +129,11 @@ _LAYOUT_BUILDERS = {
 }
 
 
+def _short(title: str) -> str:
+    """鄰居卡標題在小地圖底下只是提示，過長會把版面往下擠出畫布。"""
+    return title if len(title) <= _NEIGHBOR_TITLE_CHARS else title[: _NEIGHBOR_TITLE_CHARS - 1] + "…"
+
+
 def _book_map(spec: InfographicSpec, book_titles: Sequence[str]) -> str:
     parts: List[str] = []
     if spec.card_title in book_titles:
@@ -135,7 +148,7 @@ def _book_map(spec: InfographicSpec, book_titles: Sequence[str]) -> str:
         )
     if spec.neighbors:
         notes = "　".join(
-            f"{escape(n.relation)}：<b>{escape(n.title)}</b>" for n in spec.neighbors
+            f"{escape(n.relation)}：<b>{escape(_short(n.title))}</b>" for n in spec.neighbors
         )
         parts.append(f'<div class="map-note">{notes}</div>')
     return f'<div class="map">{"".join(parts)}</div>' if parts else ""

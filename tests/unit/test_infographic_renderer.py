@@ -68,6 +68,25 @@ class TestContent(unittest.TestCase):
         self.assertIn(icon_inner_svg("lightbulb"), _render())
 
 
+class TestHostileValues(unittest.TestCase):
+    def test_a_hostile_layout_is_escaped_inside_the_class_attribute_and_falls_back_to_flow(self):
+        html = _render(_spec(layout='"><script>alert(1)</script>'))
+        self.assertNotIn("<script>alert", html)
+        self.assertIn("&quot;&gt;&lt;script&gt;", html)
+        self.assertEqual(html.count('class="node"'), 3)        # 仍然畫出了節點（當成 flow）
+
+    def test_a_hostile_role_is_escaped_in_the_tag(self):
+        html = _render(_spec(role="<b>主軸</b>"))
+        self.assertNotIn("<b>主軸</b>", html)
+
+    def test_long_neighbor_titles_are_shortened_so_the_map_note_stays_small(self):
+        long_title = "鄰" * 40
+        spec = _spec(neighbors=[Neighbor("前提", long_title), Neighbor("導向", long_title + "二")])
+        html = _render(spec, titles=TITLES + [long_title, long_title + "二"])
+        self.assertNotIn(long_title, html)
+        self.assertIn("…", html)
+
+
 class TestLayouts(unittest.TestCase):
     def test_every_layout_renders_every_node_once(self):
         for layout in LAYOUTS:
