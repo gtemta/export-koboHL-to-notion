@@ -35,6 +35,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   ——cover 依 Tags 挑色且已有 cover 不覆蓋，若順序反過來，沒 Tags 的卡先拿到
   預設米色 cover，之後 Tags 補上了也不會回頭補色（不寫覆蓋邏輯是刻意的，避免
   蓋掉使用者手動換過的圖）。
+- **Card infographics**: `python tools/make_card_infographic.py --dry-run`（只列出會處理
+  哪些卡）／不帶則產出。處理卡片盒裡**勾選「做圖」**的卡，每張產一個 HTML 到
+  `infographics_out/<書名>/<卡片標題>.html`，再用 Figma `html.to.design` 外掛匯入成可編輯
+  圖層；詳見「卡片概念圖卡」。已產生過的卡略過，`--force` 重做。需要地端 Ollama。
 
 ### Quality gates
 - **Lint**: `python -m ruff check .` (config in `pyproject.toml`; `legacy/` + `analysis/` excluded)
@@ -83,11 +87,14 @@ src/
 │   ├── entities/                        — Book, Chapter, Highlight, BookCard dataclasses
 │   ├── repositories/                    — BookRepository, NotionRepository (ABCs)
 │   ├── services/chapter_extractor.py    — Strategy-based chapter name fallback
-│   └── services/reading_list_rules.py   — 卡片 Tags 多數決 → 書籍種類（純函式）
+│   ├── services/reading_list_rules.py   — 卡片 Tags 多數決 → 書籍種類（純函式）
+│   ├── entities/infographic_spec.py     — InfographicSpec / Node / Neighbor / MapEntry / MarkedCard
+│   └── services/infographic_rules.py    — 模型原始 JSON → 可信規格／全書地圖（純函式）
 ├── application/
 │   ├── use_cases/sync_books_use_case.py — SyncBooksUseCase.execute()
 │   ├── use_cases/generate_book_cards_use_case.py — Zettelkasten card post-sync step
 │   ├── use_cases/complete_reading_list_page_use_case.py — Reading List 書頁補完（M1）
+│   ├── use_cases/make_card_infographic_use_case.py — 勾選的卡 → 概念圖卡 HTML
 │   └── dtos/sync_result.py
 └── infrastructure/                      — Adapters for external systems
     ├── persistence/
@@ -95,7 +102,11 @@ src/
     │   ├── toc_chapter_resolver.py      — deterministic chapter mapping from Kobo TOC
     │   ├── chapter_title_heuristics.py  — regex title guessing (fallback only)
     │   ├── highlight_organizer.py       — progress-based grouping (fallback only)
-    │   └── card_store.py                — local JSON persistence / resume for cards
+    │   ├── card_store.py                — local JSON persistence / resume for cards；
+    │   │                                  `saved_cards()`/`find_by_source_id()` 唯讀查找（含已上傳批次）
+    │   └── book_map_store.py            — 全書概念地圖快取（cards_output/maps/）
+    ├── infographic/                     — 概念圖卡：spec_generator（Ollama）、html_renderer、
+    │                                      icon_library＋icons/（Lucide，固定版本）、llm_json
     ├── notion/
     │   ├── notion_api_repository.py     — implements NotionRepository (API orchestration)
     │   ├── highlight_page_blocks.py     — pure block builders: 劃線頁 v2 兩層 toggle 版面
@@ -244,6 +255,48 @@ to the generator, persists the batch via `CardStore`, then uploads through
   M2 注意：`find_section` 不看 toggle heading 內的內容、`is_blank_page` 不看 `has_children`
   ——M1 只在自己建的頁做附加寫入所以無害，M2 判斷「概要」是否空白前要先補。
 
+### 卡片概念圖卡（2026-10-23）
+
+目標：挑選要發文的卡，各出一張「≤3 行文字＋3–4 個圖示」的概念圖，可在 Figma 直接改字改版面，
+並標出這張卡在全書的位置與前後關係。只做被挑的卡，不批次全做。
+
+- **流程**：Notion 卡片盒勾「做圖」→ `tools/make_card_infographic.py` → HTML →
+  Figma `html.to.design` 外掛（Code 分頁，免費版可貼／傳單檔）→ Notion 卡片頁 `/embed` 貼 Figma
+  連結（Figma 官方說嵌入會同步更新，且只在**瀏覽器版** Notion 有效）。不寫自動貼嵌入的工具。
+  放棄 Canva：免費版沒有 API，Autofill 另需 Enterprise。
+- **卡片內容來源是本地 `cards_output/*.json`，不是 Notion**：`CardStore.saved_cards()` 讀所有批次
+  （含已上傳的——要做圖的卡早就上傳了），以 `來源劃線ID`（`card_source_id()`，與寫進 Notion 的是
+  同一個值）對回。這台機器沒有那張卡的 JSON 就略過並說明原因。
+- **兩種 LLM 呼叫**：每本書一次「全書概念地圖」（每張卡的角色 主軸/支柱/案例＋前提/導向/對照關係，
+  模型用**編號**指卡而非複誦標題，因小模型會改寫標題）；每張勾選的卡一次單卡規格
+  （lines/nodes/layout）。**角色與鄰居一律取自全書地圖**，單卡呼叫自報的會被覆蓋——它看不到整本書。
+  全書地圖快取在 `cards_output/maps/<書>.json`（獨立子資料夾，不塞進批次 JSON：一本書可能有多份
+  批次；也讓 `load_pending`、`fix_card_tags.py` 的 `cards_output/*.json` 掃描碰不到它）；卡片集合
+  變了才重做。地圖失敗時降級（預設角色「案例」、無前後關係）照常出圖，且不把失敗結果存成快取。
+- **一律走 JSON 模式**：`_ollama_generate(json_mode=True)` 送 `format: "json"`。實測 qwen3:4b 不加
+  時會先寫一大段推理直到 `num_predict` 用完（25 秒、無 JSON），加了 6.7 秒、合法 JSON。
+  `llm_json.parse_json_object` 取最左邊能完整解析的物件——**不要換成** `CardReviewer._loads_json`，
+  它先取最內層大括號，遇到巢狀 JSON 只會拿到內層小物件。
+- **模型選擇**：`OLLAMA_INFOGRAPHIC_MODEL`（沒設沿用 `OLLAMA_MODEL`）。2026-10-23 同一組合成資料
+  實測：qwen3:4b 16 秒但 6 張卡全標「支柱」、前後關係亂串、編造 1 行卡片沒說的內容；
+  gemma4:12b 236 秒（含載入），角色有區分、版面貼合內容（cause/contrast/cycle）、沒有編造。
+  做圖只處理少數勾選的卡，建議用大模型。
+- **規格不可信、全在 domain 收斂**：`normalize_spec` 限 3 行／每行 22 字（優先斷在標點，否則硬切補
+  「…」）、標籤 ≤8 字、圖示限 28 個 Lucide 白名單（去重、3–4 個、不足用預設遞補且無標籤）、
+  版面／角色不合法退回 `flow`／`案例`、鄰居卡必須在同書且不是自己。圖示 SVG 固定
+  `lucide-static@0.469.0`（ISC），`icon_inner_svg` 只認白名單名稱（名字會組成檔案路徑）。
+  每個白名單名稱必須有對應 SVG（`test_icon_library.py` 把關）。
+- **渲染器的限制是為了 Figma 匯入**：1080×1350（IG 4:5）、只用 flex、行內 SVG、實色，避免絕對定位／
+  濾鏡／CSS 變數這類匯入時容易走樣的東西；所有文字一律 `html.escape`。五種版面：flow／cause／
+  contrast／hierarchy／cycle。
+- **`做圖` 欄只由做圖工具建立**（`ensure_infographic_column()`），刻意不放進一般同步的
+  `_ensure_schema`／`_schema_additions`——否則每次同步都會多建一個與同步無關的欄位，並牴觸既有
+  「回訪欄位冪等」測試。第一次正式執行會建欄並提示再勾選後重跑；`--dry-run` 保證唯讀（不建欄、
+  不打 LLM、不建地圖、不寫檔）。
+- **尚未驗證**：Figma 匯入實測只做過手寫的 flow 版 HTML；`contrast`／`cause`／`hierarchy`／`cycle`
+  四種版面匯入後的圖層品質還沒看過。本機沒有 `cards_output/`，真實卡片的端到端沒跑過（只用合成卡片
+  ＋真 Ollama 驗證過流程與版面截圖）。
+
 ### Entry point flow
 
 `main.py` → `Settings.from_env()` → `container.build_use_case(settings)` → `SyncBooksUseCase.execute()`.
@@ -307,6 +360,9 @@ Run legacy via `python -m legacy.uploadToNotion` (the module adjusts `sys.path` 
     書籍種類 also needs the type DB (「Dante 閱讀標籤分類庫」) shared with the integration —
     the API omits relation properties whose target DB is not shared.
   - `GOOGLE_BOOKS_API_KEY`: optional; only for books without a Kobo `ImageId`.
+  - Card infographics (`tools/make_card_infographic.py`): `INFOGRAPHICS_OUTPUT_DIR`
+    (default `infographics_out`, gitignored), `OLLAMA_INFOGRAPHIC_MODEL` (optional; falls back
+    to `OLLAMA_MODEL` — a larger model such as `gemma4:12b` is recommended).
   - Zettelkasten card generation (used by both `main.py` and the legacy path):
     - `ENABLE_ZETTELKASTEN_CARDS`: `true`/`false` (default `false`)
     - `NOTION_ZETTELKASTEN_DATABASE_ID`: target 卡片盒 database (required when enabled)
@@ -397,5 +453,10 @@ Run legacy via `python -m legacy.uploadToNotion` (the module adjusts `sys.path` 
 - **卡片流程的書名比對沒有「別本書」防護**：`ReadingListRepository.resolve_or_create` 的書名
   比對仍會接受已關聯到其他劃線頁的頁（`find_page` 已加防護，見上）；目前 35 本書名無互相包含，
   尚未發生。
+- **概念圖卡的小債**（2026-10-23）：(1) `spec_generator` 從根目錄 `zettelkasten_generator` 匯入私有的
+  `_ollama_generate`（跨層，與 `ZettelkastenCard` 同一種暫時狀態，隨 generator 移進 `src/` 一併解）；
+  (2) 同書兩張卡標題相同時，全書地圖以標題為鍵會共用同一筆 entry、小地圖位置取第一張；
+  (3)「主軸最多 3 張」只靠提示詞，沒有程式把關；(4) `做圖` 勾選後不會自動取消，重跑靠「HTML 已存在
+  即略過」避免重複花 LLM。
 - **非冪等寫入的重試**：`retry_with_backoff` 對 append blocks、`POST /views` 逾時重試，若第一次其實
   已成功會重複寫入（gallery 至多重複一次：下次同步「筆記圖」段已非空白）。
