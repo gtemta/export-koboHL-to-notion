@@ -289,6 +289,22 @@ to the generator, persists the batch via `CardStore`, then uploads through
 - **渲染器的限制是為了 Figma 匯入**：1080×1350（IG 4:5）、只用 flex、行內 SVG、實色，避免絕對定位／
   濾鏡／CSS 變數這類匯入時容易走樣的東西；所有文字一律 `html.escape`。五種版面：flow／cause／
   contrast／hierarchy／cycle。
+- **畫布高度是固定的、不會自動縮放，版面要自己守預算**：獨立測試用無頭 Edge 量過
+  （`scrollHeight`）——原本 `contrast`／`hierarchy` 在標題與三行文字都滿、有三個鄰居時會比 1350px
+  高 100–260px，底部「全書位置」小地圖被切掉。現在這兩種版面的節點改成「圖示在左、標籤在右」的
+  橫排、縮小圖示，`.visual`／`.lines` 的上邊距也收緊；鄰居卡標題在小地圖下方最多顯示 14 字。
+  30 種組合（5 版面 × 3/4 節點 × 3 組內容量，含 20 字標題＋70 字書名＋16 張卡）全部放得下。
+  **改 CSS 尺寸後要重量**，不能只靠單元測試（字串測不到高度）。
+- **檔名不能信任**：`book_slug`（書名、卡片標題共用）去掉前後的 `.`／空白（`..` 會跳出資料夾，
+  Windows 還會默默吃掉結尾的點與空白，寫出的檔不是你要的那個；80 字截斷後要再清一次），
+  並替 `CON`／`NUL`／`COM1`／`CON.txt` 這類 Windows 保留名加底線。同書內「slug 會撞名」的卡
+  （標題相同、`a/b` 與 `a:b`、只差大小寫）一律加上來源劃線ID後綴；判斷依據是整本書的卡而非
+  這次勾選的卡，所以同一張卡跨次執行檔名不變。
+- **全書地圖格式不對 ≠ 成功**：`normalize_book_map` 一張卡都沒定位到時回傳 None（合法 JSON 但
+  形狀不對是小模型最常見的失敗）。否則「全部案例、沒有前後關係」的地圖會被快取，永久壓平整本書。
+- **手動改壞的 JSON 只害到自己**：`saved_cards()` 對整檔與單張卡各自略過並記 warning；
+  `RecursionError`（深層巢狀）在 `saved_cards`／`BookMapStore.load`／`parse_json_object` 都有接，
+  後者另限制最多嘗試 50 個 `{`，避免失控回應造成二次方時間。
 - **`做圖` 欄只由做圖工具建立**（`ensure_infographic_column()`），刻意不放進一般同步的
   `_ensure_schema`／`_schema_additions`——否則每次同步都會多建一個與同步無關的欄位，並牴觸既有
   「回訪欄位冪等」測試。第一次正式執行會建欄並提示再勾選後重跑；`--dry-run` 保證唯讀（不建欄、
@@ -457,6 +473,9 @@ Run legacy via `python -m legacy.uploadToNotion` (the module adjusts `sys.path` 
   `_ollama_generate`（跨層，與 `ZettelkastenCard` 同一種暫時狀態，隨 generator 移進 `src/` 一併解）；
   (2) 同書兩張卡標題相同時，全書地圖以標題為鍵會共用同一筆 entry、小地圖位置取第一張；
   (3)「主軸最多 3 張」只靠提示詞，沒有程式把關；(4) `做圖` 勾選後不會自動取消，重跑靠「HTML 已存在
-  即略過」避免重複花 LLM。
+  即略過」避免重複花 LLM；(5) 兩本書的書名前 80 字相同會共用同一個輸出資料夾（`book_slug` 截斷），
+  同名檔案以來源劃線ID區分的機制只在「同書」內生效；(6) `find_by_source_id`／`book_cards` 每次呼叫
+  都重讀全部 `cards_output/*.json`，勾選的卡多時會變慢（目前量級可忽略）；(7) 卡片盒若已存在一個
+  **非 checkbox 型別**的「做圖」欄，查詢用的 checkbox 篩選會 400（未驗證，也沒有型別檢查）。
 - **非冪等寫入的重試**：`retry_with_backoff` 對 append blocks、`POST /views` 逾時重試，若第一次其實
   已成功會重複寫入（gallery 至多重複一次：下次同步「筆記圖」段已非空白）。
