@@ -80,6 +80,29 @@ class TestLines(unittest.TestCase):
         spec = _spec(_raw(lines=[long_line]))
         self.assertEqual(spec.lines, [head + "，"])
 
+    def test_punctuation_too_early_in_the_window_does_not_gut_the_line(self):
+        # 在第 2 個字就有逗號：斷在那裡會把整句砍成「是，」，不如硬切保留大半句
+        spec = _spec(_raw(lines=["是，" + "字" * 28]))
+        line = spec.lines[0]
+        self.assertEqual(len(line), MAX_LINE_CHARS)
+        self.assertTrue(line.endswith("…"))
+        spec = _spec(_raw(lines=["，" + "字" * 40]))
+        self.assertEqual(len(spec.lines[0]), MAX_LINE_CHARS)
+
+    def test_punctuation_in_the_second_half_of_the_window_is_still_used(self):
+        head = "甲" * (MAX_LINE_CHARS // 2)
+        spec = _spec(_raw(lines=[head + "，" + "乙" * 30]))
+        self.assertEqual(spec.lines, [head + "，"])
+
+    def test_control_characters_are_removed_but_text_is_kept(self):
+        spec = _spec(_raw(lines=["\x00目標\x07決定方向\x1f。"], nodes=[
+            {"icon": "target", "label": "設\x00定"}, "lightbulb", "repeat"]))
+        self.assertEqual(spec.lines, ["目標決定方向。"])
+        self.assertEqual(spec.nodes[0].label, "設定")
+
+    def test_a_line_of_only_control_characters_counts_as_blank(self):
+        self.assertIsNone(_spec(_raw(lines=["\x00\x01", " \x07 "])))
+
     def test_overlong_line_without_punctuation_is_hard_cut_with_ellipsis(self):
         spec = _spec(_raw(lines=["甲" * (MAX_LINE_CHARS + 10)]))
         line = spec.lines[0]
@@ -282,16 +305,28 @@ class TestNormalizeBookMap(unittest.TestCase):
             ["改變身分", "環境設計", "兩分鐘法則"],
         )
 
-    def test_garbage_input_still_yields_default_entries(self):
-        for raw in (None, "text", {"cards": "oops"}, {"cards": [None, 3, {"n": "x"}]}):
-            theme, entries = normalize_book_map(raw, TITLES)
-            self.assertEqual(theme, "")
-            self.assertEqual(set(entries), set(TITLES))
-            self.assertTrue(all(e.role == "案例" and not e.neighbors for e in entries.values()))
+    def test_a_reply_that_places_no_card_is_not_a_map(self):
+        # 合法 JSON 但形狀不對是小模型最常見的失敗；若當成地圖，整本書會被永久壓平成
+        # 「全部案例、沒有前後關係」並快取起來。回傳 None 讓呼叫端走降級、不留快取。
+        for raw in (
+            None, "text", {}, {"theme": "x"}, {"cards": "oops"}, {"cards": []},
+            {"cards": [None, 3, {"n": "x"}]},
+            {"cards": [{"n": 99, "role": "主軸"}, {"n": 0, "role": "主軸"}]},
+        ):
+            self.assertIsNone(normalize_book_map(raw, TITLES), raw)
+
+    def test_no_titles_means_no_map(self):
+        self.assertIsNone(normalize_book_map(_map_raw(), []))
 
     def test_non_string_theme_becomes_empty(self):
         theme, _ = normalize_book_map(_map_raw(theme=["x"]), TITLES)
         self.assertEqual(theme, "")
+
+    def test_one_placed_card_is_enough_to_count_as_a_map(self):
+        raw = {"cards": [{"n": 2, "role": "主軸", "neighbors": []}]}
+        theme, entries = normalize_book_map(raw, TITLES)
+        self.assertEqual(entries["改變身分"].role, "主軸")
+        self.assertEqual(entries["習慣是複利"].role, "案例")
 
 
 if __name__ == "__main__":

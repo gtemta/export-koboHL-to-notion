@@ -123,7 +123,13 @@ def run(
 
     marked = repo.list_cards_marked_for_infographic()
     if not marked:
-        notes.append("卡片盒裡沒有勾選「做圖」的卡。到 Notion 勾選要做圖的卡後，再執行一次。")
+        if dry_run:
+            notes.append(
+                "（預覽）卡片盒裡沒有勾選「做圖」的卡。若卡片盒還沒有「做圖」欄，"
+                "正式執行時會自動建立。"
+            )
+        else:
+            notes.append("卡片盒裡沒有勾選「做圖」的卡。到 Notion 勾選要做圖的卡後，再執行一次。")
         return "\n".join(notes), 0
 
     result = use_case.execute(marked, force=force, dry_run=dry_run)

@@ -59,6 +59,12 @@ class TestRun(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("做圖", report)
 
+    def test_dry_run_with_nothing_marked_explains_that_the_column_may_not_exist_yet(self):
+        report, code = run(dry_run=True, force=False, repo=FakeRepo([]), use_case=FakeUseCase())
+        self.assertEqual(code, 0)
+        self.assertIn("正式執行", report)
+        self.assertNotIn("勾選要做圖的卡後，再執行一次", report)
+
     def test_newly_created_column_is_announced(self):
         report, _ = run(dry_run=False, force=False, repo=FakeRepo([], created=True),
                         use_case=FakeUseCase())

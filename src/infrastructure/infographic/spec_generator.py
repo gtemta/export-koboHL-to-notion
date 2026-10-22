@@ -123,7 +123,10 @@ class InfographicSpecGenerator:
         )
         if parsed is None:
             return None
-        return normalize_book_map(parsed, [c.title for c in cards])
+        book_map = normalize_book_map(parsed, [c.title for c in cards])
+        if book_map is None:
+            logger.warning(f"'{book_title}' 全書地圖回應沒有定位到任何一張卡，視為失敗")
+        return book_map
 
     def generate_card_spec(
         self, card: ZettelkastenCard, book_title: str, theme: str

@@ -3,6 +3,7 @@
 模型的原始 JSON 不可信：行數會超、字會爆、圖示名會編造、鄰居卡可能根本不在這本書裡。
 `normalize_spec`／`normalize_book_map` 把這些全部收斂成可信的實體，之後的渲染不必再防禦。
 """
+import unicodedata
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ..entities.infographic_spec import InfographicSpec, MapEntry, Neighbor, Node
@@ -38,30 +39,37 @@ DEFAULT_ICONS = ("target", "lightbulb", "repeat", "compass")
 _CUT_MARKS = "，。；、！？：,.;:!?"
 
 
+def _text(value: Any) -> str:
+    """模型給的字串：去掉控制字元（\x00 之類會原樣進 HTML）與頭尾空白。非字串視為空。"""
+    if not isinstance(value, str):
+        return ""
+    return "".join(ch for ch in value if unicodedata.category(ch) != "Cc").strip()
+
+
 def _clean_lines(value: Any) -> List[str]:
+    # 先拆行再清控制字元：換行本身是控制字元，清掉後兩行會黏在一起
     if isinstance(value, str):
         value = value.splitlines()
     if not isinstance(value, list):
         return []
-    lines = [item.strip() for item in value if isinstance(item, str) and item.strip()]
+    lines = [text for text in (_text(item) for item in value) if text]
     return [_fit_line(line) for line in lines[:MAX_LINES]]
 
 
 def _fit_line(line: str) -> str:
-    """過長的行優先斷在字數內的最後一個標點，沒有標點才硬切並補「…」。"""
+    """過長的行優先斷在字數內的最後一個標點；標點太靠前（斷了只剩殘句）或沒有標點，
+    就硬切並補「…」。"""
     if len(line) <= MAX_LINE_CHARS:
         return line
     window = line[:MAX_LINE_CHARS]
     cut = max(window.rfind(mark) for mark in _CUT_MARKS)
-    if cut >= 0:
+    if cut >= MAX_LINE_CHARS // 2:
         return window[: cut + 1]
     return line[: MAX_LINE_CHARS - 1] + "…"
 
 
 def _clean_label(value: Any) -> str:
-    if not isinstance(value, str):
-        return ""
-    label = value.strip()
+    label = _text(value)
     if len(label) > MAX_LABEL_CHARS:
         label = label[: MAX_LABEL_CHARS - 1] + "…"
     return label
@@ -137,8 +145,11 @@ def _is_card_number(value: Any, count: int) -> bool:
 
 def normalize_book_map(
     raw: Any, titles: Sequence[str]
-) -> Tuple[str, Dict[str, MapEntry]]:
+) -> Optional[Tuple[str, Dict[str, MapEntry]]]:
     """全書概念地圖的原始輸出 → (全書主軸, {卡片標題: MapEntry})。
+
+    模型一張卡都沒定位到（合法 JSON 但形狀不對，是小模型最常見的失敗）時回傳 None——
+    若硬湊出「全部案例、沒有前後關係」的地圖，會被快取而永久壓平整本書。
 
     模型用「編號」指卡（1 起算、對應 titles 順序）而不是複誦標題——小模型會改寫標題，
     編號則可以由程式精確對回。每張卡都保證有 entry：模型漏掉的卡退回預設角色、無鄰居，
@@ -148,6 +159,8 @@ def normalize_book_map(
     theme = theme.strip() if isinstance(theme, str) else ""
 
     count = len(titles)
+    if not count:
+        return None
     entries: Dict[str, MapEntry] = {title: MapEntry(role=DEFAULT_ROLE) for title in titles}
     seen_cards = set()
     cards = data.get("cards")
@@ -163,6 +176,8 @@ def normalize_book_map(
             role=role if role in ROLES else DEFAULT_ROLE,
             neighbors=_map_neighbors(item.get("neighbors"), number, titles),
         )
+    if not seen_cards:
+        return None
     return theme, entries
 
 

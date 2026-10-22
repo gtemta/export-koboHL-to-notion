@@ -107,6 +107,13 @@ class TestBuildBookMap(unittest.TestCase):
             self.assertIsNone(gen.build_book_map("原子習慣", CARDS), reply)
             patcher.stop()
 
+    def test_valid_json_of_the_wrong_shape_is_a_failure_not_a_flat_map(self):
+        for reply in ('{"theme": "x"}', '{"cards": "oops"}', '{"cards": [{"n": 99, "role": "主軸"}]}'):
+            gen, _, patcher = _generator(reply)
+            self.addCleanup(patcher.stop)
+            self.assertIsNone(gen.build_book_map("原子習慣", CARDS), reply)
+            patcher.stop()
+
     def test_a_book_without_cards_never_calls_the_model(self):
         gen, fake, patcher = _generator("{}")
         self.addCleanup(patcher.stop)
