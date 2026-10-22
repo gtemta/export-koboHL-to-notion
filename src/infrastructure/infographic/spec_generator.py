@@ -52,7 +52,7 @@ def build_card_prompt(card: ZettelkastenCard, book_title: str, theme: str) -> st
 {{"lines": ["第一行", "第二行"], "nodes": [{{"icon": "圖示名", "label": "短標籤"}}], "layout": "版面名"}}
 
 規則：
-- lines：最多 3 行，每行不超過 {MAX_LINE_CHARS} 字的完整短句。只能濃縮這張卡片已經說的內容，不得加入卡片沒說的結論或舉例。
+- lines：最多 3 行，每行不超過 {MAX_LINE_CHARS} 字的完整短句。只能濃縮這張卡片已經說的內容，不得加入卡片沒說的結論或舉例。標題已經會顯示在圖上，lines 不要重複卡片標題。
 - nodes：3 到 4 個，依序是這個概念的關鍵環節。icon 只能從下方圖示清單挑；label 是不超過 {MAX_LABEL_CHARS} 字的名詞片語，不要整句話。
 - layout：只能從下列挑一個，選最貼近這張卡內容結構的：
 {layouts}
@@ -101,6 +101,7 @@ class InfographicSpecGenerator:
                 num_ctx=int(os.getenv("OLLAMA_BATCH_NUM_CTX", "16384")),
                 keep_alive=os.getenv("OLLAMA_KEEP_ALIVE", "30m"),
                 think=False,
+                json_mode=True,
                 label=label,
             )
         except Exception as e:  # noqa: BLE001 — 單次 LLM 失敗由呼叫端降級，不中止整批

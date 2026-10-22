@@ -45,6 +45,11 @@ class TestPrompts(unittest.TestCase):
         prompt = build_card_prompt(_card("改變身分"), "原子習慣", "")
         self.assertNotIn("全書主軸", prompt)
 
+    def test_card_prompt_asks_lines_not_to_repeat_the_title(self):
+        # 實測 gemma4:12b 常把第一行寫成標題的複誦；標題在圖上已經是最大的字
+        prompt = build_card_prompt(_card("改變身分"), "原子習慣", "")
+        self.assertIn("不要重複卡片標題", prompt)
+
     def test_card_prompt_forbids_adding_conclusions_the_card_does_not_state(self):
         prompt = build_card_prompt(_card("改變身分"), "原子習慣", "")
         self.assertIn("不得加入", prompt)

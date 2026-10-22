@@ -38,6 +38,7 @@ def _ollama_generate(
     keep_alive: Optional[str] = None,
     think: Optional[bool] = None,
     salvage_partial: bool = False,
+    json_mode: bool = False,
     label: str = "ollama",
 ) -> Optional[str]:
     """One streaming POST to Ollama `/api/generate`, returning the accumulated text.
@@ -50,6 +51,9 @@ def _ollama_generate(
       a 400 response means the server rejects the parameter, so we retry without it.
     - in-stream `{"error": ...}` chunks are surfaced instead of silently truncating.
     - `done_reason == "length"` with empty output is called out explicitly.
+    - `json_mode=True` sends `format: "json"`, constraining decoding to valid JSON.
+      Small models otherwise tend to write out their reasoning first and run
+      through `num_predict` before any JSON appears (qwen3:4b, measured).
 
     Returns None when nothing usable came back. `salvage_partial=True` returns
     whatever streamed in before a timeout/error — only for callers whose parser
@@ -69,6 +73,8 @@ def _ollama_generate(
         payload["keep_alive"] = keep_alive
     if think is not None:
         payload["think"] = think
+    if json_mode:
+        payload["format"] = "json"
 
     accumulated: List[str] = []
     start_time = time.monotonic()
