@@ -32,6 +32,7 @@ from notion_client import Client
 from zettelkasten_generator import ZettelkastenCard
 
 from ...domain.entities.book_card import BookCard
+from ...domain.entities.infographic_spec import MarkedCard
 from ..persistence.card_store import card_source_id
 from .card_visuals import cover_url_for
 from .rate_limiter import NotionRateLimiter
@@ -47,6 +48,8 @@ _SOURCE_ID_PROPERTY = "來源劃線ID"
 # rich_text holding free concept tags (、-joined); multi_select for fixed categories.
 _KEYWORD_PROPERTY = "Key Word"
 _TAGS_PROPERTY = "Tags"
+# 使用者勾選「要做概念圖」的 checkbox；只由 tools/make_card_infographic.py 建立。
+_INFOGRAPHIC_PROPERTY = "做圖"
 
 # 回訪機制用的欄位。加工狀態刻意不叫「狀態」——審核年代那個已退役的 `狀態` 欄
 # 語意完全不同（見 docs/NOTION_OUTPUT_IMPROVEMENTS.md），同名會混淆。
@@ -207,6 +210,56 @@ class ZettelkastenCardRepository:
             logger.warning(f"讀取書頁 {books_page_id} 的卡片失敗: {e}")
             return []
 
+    def ensure_infographic_column(self) -> bool:
+        """Create the 做圖 checkbox column if the 卡片盒 lacks it; True only when
+        this call created it.
+
+        Deliberately not part of `_ensure_schema`: that runs on every sync, and
+        this column only matters to tools/make_card_infographic.py. When the
+        schema can't be read we don't write blind (returns False).
+        """
+        known = self._known_properties()
+        if known is None or _INFOGRAPHIC_PROPERTY in known:
+            return False
+        retry_with_backoff(
+            lambda: self._client.databases.update(
+                database_id=self._database_id,
+                properties={_INFOGRAPHIC_PROPERTY: {"checkbox": {}}},
+            ),
+            self._rate_limiter,
+        )
+        self._schema_props = self._fetch_property_names()
+        logger.info(f"卡片盒補上「{_INFOGRAPHIC_PROPERTY}」勾選欄")
+        return True
+
+    def list_cards_marked_for_infographic(self) -> List[MarkedCard]:
+        """Cards whose 做圖 box is ticked. Read-only.
+
+        A 卡片盒 without the column has nothing marked (returns []) — querying a
+        property that does not exist is a 400. When the schema can't be read we
+        just try the query. API failures propagate.
+        """
+        known = self._known_properties()
+        if known is not None and _INFOGRAPHIC_PROPERTY not in known:
+            logger.info(f"卡片盒沒有「{_INFOGRAPHIC_PROPERTY}」欄，視為沒有勾選的卡")
+            return []
+        pages = self._query_all(
+            {"property": _INFOGRAPHIC_PROPERTY, "checkbox": {"equals": True}}
+        )
+        return [
+            MarkedCard(
+                page_id=page.get("id", ""),
+                title=self._plain_title(page),
+                source_id=self._read_source_id_property(page),
+            )
+            for page in pages
+        ]
+
+    @staticmethod
+    def _plain_title(page: dict) -> str:
+        prop = ((page or {}).get("properties") or {}).get("標題") or {}
+        return "".join(p.get("plain_text", "") for p in prop.get("title") or []).strip()
+
     @staticmethod
     def _to_book_card(page: dict) -> BookCard:
         props = (page or {}).get("properties") or {}
@@ -359,14 +412,18 @@ class ZettelkastenCardRepository:
         """Every 卡片盒 page whose 來源 relation contains `books_page_id`, all
         pages of results. Raises on API failure — callers decide how to degrade.
         """
+        yield from self._query_all(
+            {"property": "來源", "relation": {"contains": books_page_id}}
+        )
+
+    def _query_all(self, filter_: dict) -> Iterator[dict]:
+        """Every 卡片盒 page matching `filter_`, all pages of results.
+        Raises on API failure — callers decide how to degrade."""
         cursor: Optional[str] = None
         while True:
             kwargs = {
                 "database_id": self._database_id,
-                "filter": {
-                    "property": "來源",
-                    "relation": {"contains": books_page_id},
-                },
+                "filter": filter_,
                 "page_size": 100,
             }
             if cursor:

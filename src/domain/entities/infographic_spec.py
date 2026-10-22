@@ -23,6 +23,15 @@ class MapEntry:
     neighbors: List[Neighbor] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class MarkedCard:
+    """卡片盒裡被使用者勾選「做圖」的一張卡。source_id 是 `來源劃線ID`，
+    用來回本地 cards_output 找完整卡片；手動建立的卡沒有，會是空字串。"""
+    page_id: str
+    title: str
+    source_id: str
+
+
 @dataclass
 class InfographicSpec:
     """一張概念圖卡要畫什麼（尚未決定怎麼畫）。
