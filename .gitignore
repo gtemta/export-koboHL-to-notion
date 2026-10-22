@@ -5,6 +5,7 @@ __pycache__/
 *.pyc
 summaries/
 cards_output/
+infographics_out/
 logs/
 *.log
 .claude/
