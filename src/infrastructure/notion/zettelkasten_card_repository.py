@@ -322,6 +322,35 @@ class ZettelkastenCardRepository:
                 texts.append(text)
         return " ".join(texts)
 
+    def list_chapter_callouts(self) -> List[Tuple[str, str, str]]:
+        """(card title, block id, text) of every top-level 📖 chapter callout in
+        the card box. One page of blocks per card is enough. API failures
+        propagate on purpose: a failed read must never look like "nothing to
+        clean"."""
+        found: List[Tuple[str, str, str]] = []
+        for page in self._query_all({"property": "標題", "title": {"is_not_empty": True}}):
+            page_id = page.get("id", "")
+            result = retry_with_backoff(
+                lambda pid=page_id: self._client.blocks.children.list(
+                    block_id=pid, page_size=100
+                ),
+                self._rate_limiter,
+            ) or {}
+            for block in result.get("results", []):
+                if not is_chapter_callout(block):
+                    continue
+                rich = (block.get("callout") or {}).get("rich_text") or []
+                text = "".join(p.get("plain_text", "") for p in rich).strip()
+                found.append((self._plain_title(page), block.get("id", ""), text))
+        return found
+
+    def delete_block(self, block_id: str) -> None:
+        """Archive one block. API failures propagate."""
+        retry_with_backoff(
+            lambda: self._client.blocks.delete(block_id=block_id),
+            self._rate_limiter,
+        )
+
     def update_board_fields(self, update: CardUpdate) -> None:
         """Write the non-None board fields of one card in a single call;
         nothing to write → no API call. API failures propagate."""
@@ -726,25 +755,15 @@ class ZettelkastenCardRepository:
                 },
             })
 
-        # 章名可能被 _clean_chapter_reference 清成空字串（誤判成章名的劃線內文），
-        # 但進度是 Kobo 硬數據、永遠可信，不該一起消失。
-        if card.chapter_reference or card.chapter_progress:
-            progress = (
-                f"（進度 {card.chapter_progress:.0%}）"
-                if card.chapter_progress else ""
-            )
-            blocks.append({
-                "object": "block",
-                "type": "callout",
-                "callout": {
-                    "icon": {"type": "emoji", "emoji": "📖"},
-                    "rich_text": [{"type": "text", "text": {
-                        "content": f"{card.chapter_reference}{progress}"
-                    }}],
-                },
-            })
-
         return blocks
+
+
+def is_chapter_callout(block: dict) -> bool:
+    """True for the 📖 chapter/progress callout old cards carry (icon emoji 📖)."""
+    if (block or {}).get("type") != "callout":
+        return False
+    icon = (block.get("callout") or {}).get("icon") or {}
+    return icon.get("type") == "emoji" and icon.get("emoji") == "📖"
 
 
 def _paragraph(text: str) -> dict:
