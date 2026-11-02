@@ -426,7 +426,8 @@ git commit -m "✨ feat: 卡片盒補上看板欄位並支援讀寫"
 - Consumes: `ensure_card_board_columns()`；「實測結果」表。
 - Produces（`notion_views_client.py`；原 `CARD_GALLERY_NAME`、`card_gallery_body`、`create_card_gallery` 全部改名，不留舊名）：
   - `CARD_VIEW_NAME = "本書卡片"`
-  - `card_board_body(data_source_id, book_page_id, placement: Dict) -> Dict`
+  - `card_board_body(data_source_id, book_page_id, placement: Dict, role_property_id: str, order_property_id: str) -> Dict`：`group_by.property_id` 與 `configuration.properties[].property_id` 只收欄位 id（用名稱會 400），`filter`、`sorts` 用欄位名。
+  - `NotionViewsClient.board_property_ids(cards_database_id) -> Tuple[str, str]`：`GET data_sources/{id}` 取 `properties["角色"].id`、`properties["閱讀順序"].id`，**URL 編碼原樣**傳，不要解碼；每個資料庫快取一次；欄位不存在時 raise。
   - `ViewSwap(add_board: bool, delete_gallery_id: Optional[str])`（frozen dataclass）
   - `plan_view_swap(views: Sequence[Dict]) -> ViewSwap`（純函式）
   - `NotionViewsClient.create_card_board(page_id, cards_database_id, book_page_id, after_block_id) -> Optional[str]`
@@ -439,17 +440,27 @@ git commit -m "✨ feat: 卡片盒補上看板欄位並支援讀寫"
 ```python
 def test_board_body_shape(self):
     placement = {"database_id": "linked"}
-    self.assertEqual(card_board_body("ds-1", "page-1", placement), {
+    self.assertEqual(card_board_body("ds-1", "page-1", placement, "%7B%3Da%7D", "%5BC%7DU"), {
         "data_source_id": "ds-1", "name": "本書卡片", "type": "board", "database_id": "linked",
         "filter": {"property": "來源", "relation": {"contains": "page-1"}},
         "sorts": [{"property": "閱讀順序", "direction": "ascending"}],
         "configuration": {
             "type": "board",
-            "group_by": {"type": "select", "property_id": "角色", "sort": {"type": "manual"}, "hide_empty_groups": False},
+            "group_by": {"type": "select", "property_id": "%7B%3Da%7D", "sort": {"type": "manual"}, "hide_empty_groups": False},
             "cover": {"type": "page_cover"},
-            "properties": [{"property_id": "閱讀順序", "visible": True}],
+            "properties": [{"property_id": "%5BC%7DU", "visible": True}],
         },
     })
+
+def test_board_property_ids_are_read_once_and_passed_encoded(self):
+    # fake 的 GET data_sources/ds-1 回 {"properties": {"角色": {"id": "%7B%3Da%7D"}, "閱讀順序": {"id": "%5BC%7DU"}}}
+    client = _client(fake)
+    self.assertEqual(client.board_property_ids("cards-db"), ("%7B%3Da%7D", "%5BC%7DU"))
+    client.board_property_ids("cards-db")
+    self.assertEqual(len([r for r in fake.requests if r[1] == "data_sources/ds-1"]), 1)
+
+def test_missing_board_column_raises(self):
+    # fake 的 properties 沒有「角色」→ assertRaises
 
 def test_gallery_alone_is_swapped(self):
     self.assertEqual(plan_view_swap([_view("g", "本書卡片", "gallery")]), ViewSwap(True, "g"))
