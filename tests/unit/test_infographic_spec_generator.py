@@ -87,15 +87,18 @@ class TestBuildBookMap(unittest.TestCase):
             "cards": [
                 {"n": 1, "role": "主軸", "neighbors": [{"relation": "導向", "n": 2}]},
                 {"n": 2, "role": "支柱", "neighbors": []},
+                {"n": 3, "role": "案例", "neighbors": []},
+                {"n": 4, "role": "案例", "neighbors": []},
             ],
         }, ensure_ascii=False)
         gen, fake, patcher = _generator(f"好的：\n```json\n{reply}\n```")
         self.addCleanup(patcher.stop)
-        theme, entries = gen.build_book_map("原子習慣", CARDS)
+        cards = CARDS + [_card("兩分鐘法則"), _card("第五張")]
+        theme, entries = gen.build_book_map("原子習慣", cards)
         self.assertEqual(theme, "習慣靠系統")
         self.assertEqual(entries["習慣是複利"].role, "主軸")
         self.assertEqual(entries["習慣是複利"].neighbors[0].title, "改變身分")
-        self.assertEqual(entries["環境設計"].role, "案例")      # 模型漏掉的卡 → 預設
+        self.assertEqual(entries["第五張"].role, "案例")        # 模型漏掉的卡 → 預設（4/5 仍算地圖）
         _, kwargs = fake.calls[0]
         self.assertEqual((kwargs["model"], kwargs["api_url"], kwargs["timeout_s"]), ("m1", "http://x/api/generate", 7))
         self.assertIs(kwargs["think"], False)
