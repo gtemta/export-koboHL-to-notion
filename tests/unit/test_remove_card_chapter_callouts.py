@@ -44,6 +44,14 @@ class TestIsChapterCallout(unittest.TestCase):
         self.assertFalse(is_chapter_callout({"type": "callout"}))
 
 
+    def test_callout_with_children_does_not_match(self):
+        block = _callout("📖")
+        block["has_children"] = True
+        self.assertFalse(is_chapter_callout(block))
+        block["has_children"] = False
+        self.assertTrue(is_chapter_callout(block))
+
+
 class _ListingClient:
     """databases.query / blocks.children.list 的假 client。"""
 
@@ -99,6 +107,17 @@ class TestRepositoryListing(unittest.TestCase):
                 "p2": [],
             },
         )
+        self.assertEqual(
+            _repo_with(client).list_chapter_callouts(),
+            [("卡片甲", "c1", "第一章（進度 42%）")],
+        )
+
+    def test_callout_with_children_is_never_listed(self):
+        nested = _real_callout("c9", "手動加過內容的章名")
+        nested["has_children"] = True
+        childless = _real_callout("c1", "第一章（進度 42%）")
+        childless["has_children"] = False
+        client = _ListingClient([_page("p1", "卡片甲")], {"p1": [nested, childless]})
         self.assertEqual(
             _repo_with(client).list_chapter_callouts(),
             [("卡片甲", "c1", "第一章（進度 42%）")],

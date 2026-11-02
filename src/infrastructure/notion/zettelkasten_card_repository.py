@@ -759,8 +759,12 @@ class ZettelkastenCardRepository:
 
 
 def is_chapter_callout(block: dict) -> bool:
-    """True for the 📖 chapter/progress callout old cards carry (icon emoji 📖)."""
-    if (block or {}).get("type") != "callout":
+    """True for the 📖 chapter/progress callout old cards carry (icon emoji 📖).
+
+    A callout with children never matches: sync only ever wrote childless ones,
+    so one with children was hand-edited, and deleting it would archive the
+    nested content too."""
+    if (block or {}).get("type") != "callout" or block.get("has_children"):
         return False
     icon = (block.get("callout") or {}).get("icon") or {}
     return icon.get("type") == "emoji" and icon.get("emoji") == "📖"
