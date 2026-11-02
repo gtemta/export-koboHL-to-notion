@@ -39,13 +39,13 @@
 
 | 問題 | 預設假設 | 實測 |
 |---|---|---|
-| 自我關聯的建立 body | `{"relation": {"database_id": DB, "type": "single_property", "single_property": {}}}` | |
-| 單一欄位在 API 寫一邊，另一邊讀得到嗎 | 不確定（程式一律兩邊都寫） | |
-| `group_by.property_id` 收欄位名嗎 | 收（文件對 `properties` 說可用名稱） | |
-| 看板欄位順序 | `sort: {"type": "manual"}` 會照選項順序 | |
-| 卡片顯示欄位 | `properties: [{"property_id": "閱讀順序", "visible": true}]` 其餘預設隱藏 | |
-| 筆記圖段的 gallery 在 `list_blocks` 的樣子 | `type == "child_database"`，block id 即 linked database id | |
-| linked database 能新增 view、刪 gallery | 能 | |
+| 自我關聯的建立 body | `{"relation": {"database_id": DB, "type": "single_property", "single_property": {}}}` | 一次建成，用舊版 API（`Client(auth=token)`、`databases.update`）。回應多了 `data_source_id`、`limit: null`，欄位 id `rRQD`，`type: single_property`，確實只有一個欄位（卡片盒欄位清單裡只多一個「相關卡片」）。 |
+| 單一欄位在 API 寫一邊，另一邊讀得到嗎 | 不確定（程式一律兩邊都寫） | **讀不到**。只在〈危機處理應對〉寫入〈50%法則〉後，危機側讀回 `[50%法則]`，50%法則側 `pages.retrieve` 的 `相關卡片` 是 `[]`（隔了一段時間再讀仍是空）。程式必須兩邊都寫。 |
+| `group_by.property_id` 收欄位名嗎 | 收（文件對 `properties` 說可用名稱） | **不收**：用 `"角色"` 回 400 `Group-by property "角色" not found.`。要用欄位 id，且用 API 回傳的 **URL 編碼原樣**（`databases.retrieve` / `GET data_sources/{id}` 的 `properties[名].id`，角色=`%7B%3Da%7D`、閱讀順序=`%5BC%7DU`）可以建成，回應解碼成 `{=a}`、`[C}U`。`sorts[].property`、`filter.property` 用欄位名（`閱讀順序`、`來源`）收，回應轉成 id。`configuration.properties[].property_id` 同樣用編碼 id 收。 |
+| 看板欄位順序 | `sort: {"type": "manual"}` 會照選項順序 | 建立成功（`sort.type: manual`、`hide_empty_groups: false`），但 API 與 Notion 連接器讀回的 view 設定都**不含欄位順序**，無法由程式確認。實際左到右順序與「沒有角色」欄位置：**待使用者確認**（若順序不對，改試 `ascending`）。 |
+| 卡片顯示欄位 | `properties: [{"property_id": "閱讀順序", "visible": true}]` 其餘預設隱藏 | 成立。回應列出全部 14 個欄位，只有 `閱讀順序` 是 `visible: true`，其餘（含 角色、標題、相關卡片）皆 false；Notion 連接器讀回 `displayProperties: ["閱讀順序"]`（標題在看板上本來就會顯示，實際外觀**待使用者確認**）。拖卡片到別欄是否改 `角色`：**待使用者確認**。 |
+| 筆記圖段的 gallery 在 `list_blocks` 的樣子 | `type == "child_database"`，block id 即 linked database id | 成立。`heading_2「筆記圖」` 後面緊接 `type: child_database`（`child_database.title` = "Untitled"），block id `3ebf8b18-6b35-8189-8015-ea905765bd0a` 即 `GET views` 與 `POST views` 用的 `database_id`（view 的 `parent.database_id` 與它相同）。 |
+| linked database 能新增 view、刪 gallery | 能 | 能。對該 `database_id` `POST views` 建出看板（view `40cf8b18-6b35-8109-90b9-000c00ab6f06`，同時列出 2 個 view），再 `DELETE views/3ebf8b18-6b35-813b-bf0c-000c5403ba3e`（原 gallery），回應 `object: view`，之後 `GET views` 只剩看板。先加後刪（至少要留一個 view）。 |
 
 ---
 
