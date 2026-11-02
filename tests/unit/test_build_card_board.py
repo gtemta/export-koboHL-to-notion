@@ -1,6 +1,7 @@
 """BuildCardBoardUseCase 與 tools/build_card_board.py：Notion、Kobo、模型全以假物件取代。"""
 import os
 import unittest
+from dataclasses import replace
 from unittest import mock
 
 from src.application.dtos.card_board_report import CardBoardReport
@@ -87,6 +88,7 @@ class _FakeViews:
             raise AssertionError("dry run must not create a board")
         self.calls.append(("create_card_board", page_id, cards_database_id, book_page_id,
                            after_block_id))
+        return "view-1"
 
     def swap_gallery_for_board(self, linked_database_id, cards_database_id, book_page_id):
         if self.read_only:
@@ -263,6 +265,87 @@ class TestFilledBooks(unittest.TestCase):
         self.assertEqual(fakes["cards"].ensure_calls, 0)
         self.assertEqual(fakes["cards"].written, {})
         self.assertEqual(fakes["views"].calls, [])
+
+
+class TestFixRound1(unittest.TestCase):
+    def test_filled_book_with_a_blank_order_gets_no_card_writes(self):
+        cards = [filled("a", order=10), filled("b", order=None), filled("c", order=30)]
+        use_case, fakes = build(cards=cards, section_body=[{"type": "paragraph"}])
+        report = use_case.execute()
+        self.assertEqual(fakes["cards"].written, {})
+        self.assertEqual(fakes["positions"].calls, [])
+        self.assertEqual(report.untouched, ["書一"])
+        self.assertEqual(report.processed, [])
+
+    def test_filled_book_still_gets_its_board(self):
+        cards = [filled("a"), filled("b", order=None), filled("c")]
+        use_case, fakes = build(cards=cards, section_body=[])
+        use_case.execute()
+        self.assertEqual(fakes["views"].calls[-1][0], "create_card_board")
+        self.assertEqual(fakes["cards"].written, {})
+
+    def _stateful(self, fail_on=None):
+        """寫入會回存到假的卡片盒，讓重跑看得到上一輪寫了什麼。"""
+        use_case, fakes = build()
+        cards = fakes["cards"]
+        pending = {"fail_on": fail_on}
+
+        def update(upd):
+            if upd.page_id == pending["fail_on"]:
+                pending["fail_on"] = None
+                raise RuntimeError("notion hiccup")
+            cards.written[upd.page_id] = upd
+            cards.cards = [
+                replace(c, role=upd.role or c.role,
+                        reading_order=upd.reading_order
+                        if upd.reading_order is not None else c.reading_order)
+                if c.page_id == upd.page_id else c
+                for c in cards.cards]
+        cards.update_board_fields = update
+        return use_case, cards
+
+    def test_mid_book_failure_then_rerun_gives_the_uninterrupted_orders(self):
+        clean_use_case, clean_cards = self._stateful()
+        clean_use_case.execute()
+        expected = {c.page_id: c.reading_order for c in clean_cards.cards}
+        self.assertEqual(expected, {"c": 10, "e": 20, "a": 30, "d": 40, "b": 50})
+
+        use_case, cards = self._stateful(fail_on="a")
+        first = use_case.execute()
+        self.assertEqual([t for t, _ in first.failed], ["書一"])
+        # 失敗前寫下的是書中順序的前綴
+        self.assertEqual(set(cards.written), {"c", "e"})
+        use_case.execute()
+        self.assertEqual({c.page_id: c.reading_order for c in cards.cards}, expected)
+
+    def test_small_book_writes_in_book_order_too(self):
+        use_case, fakes = build(cards=[card("d"), card("e")])
+        use_case.execute()
+        self.assertEqual(list(fakes["cards"].written), ["e", "d"])
+
+    def test_board_creation_returning_none_fails_the_book(self):
+        use_case, fakes = build(section_body=[])
+        fakes["views"].create_card_board = mock.Mock(return_value=None)
+        report = use_case.execute()
+        self.assertEqual([t for t, _ in report.failed], ["書一"])
+        self.assertEqual(report.processed, [])
+        code = run(False, None, use_case=_Stub(report))[1]
+        self.assertEqual(code, 1)
+
+    def test_cards_without_a_position_are_warned_about_once_per_book(self):
+        cards = [card("a"), card("b"), card("c"), card("x"),
+                 replace(card("y"), source_id="")]
+        use_case, _ = build(cards=cards)
+        with self.assertLogs(UC_LOGGER, level="WARNING") as logs:
+            use_case.execute()
+        warnings = [line for line in logs.output if "查不到書中位置" in line]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("2 張卡", warnings[0])
+
+    def test_no_warning_when_every_card_has_a_position(self):
+        use_case, _ = build()
+        with self.assertNoLogs(UC_LOGGER, level="WARNING"):
+            use_case.execute()
 
 
 class TestBookPage(unittest.TestCase):

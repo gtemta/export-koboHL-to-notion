@@ -157,10 +157,14 @@ class BuildCardBoardUseCase:
         elif needs_map(cards):
             logger.info(f"《{title}》{len(cards)} 張卡不足 {MIN_CARDS_FOR_MAP} 張，"
                         "不需跑模型：角色填預設、只排閱讀順序")
-            updates = plan_book_updates(cards, None, self._positions_of(cards))
+            positions = self._positions_of(title, cards)
+            # 依書中順序交給 plan：寫到一半失敗時，已寫的是編號的前綴，重跑會接著編出同樣的號碼
+            updates = plan_book_updates(
+                sort_by_book_order(cards, positions), None, positions)
         else:
-            logger.info(f"《{title}》不需跑模型：每張卡都已有角色")
-            updates = plan_book_updates(cards, None, {})
+            # 每張卡都有角色 = 整本書完全跳過（連空白的閱讀順序也不補，使用者可能是故意清掉的）
+            logger.info(f"《{title}》不需跑模型：每張卡都已有角色，不寫入任何卡片欄位")
+            updates = []
 
         for update in updates:
             self._cards.update_board_fields(update)
@@ -176,7 +180,7 @@ class BuildCardBoardUseCase:
                          ) -> Optional[List[CardUpdate]]:
         # 模型要看整本書，所以舊卡新卡的內文都要讀
         with_text = [replace(c, content=self._cards.card_text(c.page_id)) for c in cards]
-        positions = self._positions_of(cards)
+        positions = self._positions_of(title, cards)
         by_book_order = sort_by_book_order(with_text, positions)
         listings = (by_book_order, shuffled_listing(by_book_order, title))
 
@@ -188,7 +192,7 @@ class BuildCardBoardUseCase:
                 return None
             runs.append(run)
         logger.info(f"《{title}》已跑模型（{len(with_text)} 張卡，兩次詢問）")
-        return plan_book_updates(with_text, merge_map_runs(runs[0], runs[1]), positions)
+        return plan_book_updates(by_book_order, merge_map_runs(runs[0], runs[1]), positions)
 
     def _ask_run(self, title: str, listing: Sequence[BoardCard]) -> Optional[MapRun]:
         page_ids = [c.page_id for c in listing]
@@ -200,9 +204,15 @@ class BuildCardBoardUseCase:
             logger.warning(f"《{title}》模型回應不可用（第 {attempt}/{_ATTEMPTS_PER_RUN} 次）")
         return None
 
-    def _positions_of(self, cards: Sequence[BoardCard]) -> Positions:
+    def _positions_of(self, title: str, cards: Sequence[BoardCard]) -> Positions:
         ids = [c.source_id for c in cards if c.source_id]
-        return self._positions.positions_for(ids) if ids else {}
+        positions = self._positions.positions_for(ids) if ids else {}
+        unknown = sum(1 for c in cards if not (c.source_id and c.source_id in positions))
+        if unknown:
+            logger.warning(
+                f"《{title}》有 {unknown} 張卡查不到書中位置（手動卡或別台機器產的卡），"
+                "閱讀順序會排在最後")
+        return positions
 
     def _ensure_board(self, title: str, page: dict) -> None:
         if not self._reading_list.is_created_by_integration(page):
@@ -219,8 +229,11 @@ class BuildCardBoardUseCase:
             for linked_id in linked:
                 self._views.swap_gallery_for_board(linked_id, self._cards_database_id, page_id)
         elif section_is_empty(body):
-            self._views.create_card_board(
+            view_id = self._views.create_card_board(
                 page_id, self._cards_database_id, page_id, heading["id"])
+            if view_id is None:
+                # 建不出來就是失敗，不能讓這本書以「已處理、exit 0」收場
+                raise RuntimeError("看板建立失敗：Notion 沒有回傳 view（卡片欄位已寫入，重跑會再試）")
         else:
             logger.info(f"《{title}》「{SECTION_NOTES}」段已有使用者內容，不動看板")
 
