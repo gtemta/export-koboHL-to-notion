@@ -141,7 +141,7 @@ def _build_page_use_case(
         views = NotionViewsClient(token=settings.notion_token, rate_limiter=limiter)
     else:
         logger.warning(
-            "NOTION_ZETTELKASTEN_DATABASE_ID 未設定：書頁不建卡片 gallery、不推算書籍種類")
+            "NOTION_ZETTELKASTEN_DATABASE_ID 未設定：書頁不建卡片看板、不推算書籍種類")
     page_reading_list = reading_list
     page_cover_uploader = cover_uploader
     if settings.dry_run:
@@ -156,6 +156,7 @@ def _build_page_use_case(
         cover_uploader=page_cover_uploader,
         cards_database_id=settings.notion_zettelkasten_database_id,
         type_mapping=dict(DEFAULT_BOOK_TYPE_MAPPING),
+        dry_run=settings.dry_run,
     )
 
 

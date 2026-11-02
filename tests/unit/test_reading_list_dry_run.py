@@ -15,6 +15,7 @@ from src.infrastructure.notion.dry_run_reading_list_repository import (
     DryRunNotionViewsClient,
     DryRunReadingListRepository,
 )
+from src.infrastructure.notion.notion_views_client import ViewSwap
 
 
 class _Inner:
@@ -51,9 +52,19 @@ class _Inner:
     def data_source_id(self, database_id):
         return "ds-1"
 
-    def create_card_gallery(self, page_id, cards_database_id, book_page_id, after_block_id):
-        self.writes.append("gallery")
+    def create_card_board(self, page_id, cards_database_id, book_page_id, after_block_id):
+        self.writes.append("board")
         return "view-1"
+
+    def describe_swap(self, linked_database_id):
+        return ViewSwap(True, "g")
+
+    def swap_gallery_for_board(self, linked_database_id, cards_database_id, book_page_id):
+        self.writes.append("swap")
+        return True
+
+    def board_property_ids(self, cards_database_id):
+        return ("role-id", "order-id")
 
 
 class TestDryRunReadingList(unittest.TestCase):
@@ -90,9 +101,20 @@ class TestDryRunReadingList(unittest.TestCase):
         with self.assertLogs(
             "src.infrastructure.notion.dry_run_reading_list_repository", level="INFO"
         ):
-            self.assertIsNone(views.create_card_gallery("rl-1", "cards", "rl-1", "h-1"))
+            self.assertIsNone(views.create_card_board("rl-1", "cards", "rl-1", "h-1"))
         self.assertEqual(inner.writes, [])
         self.assertEqual(views.data_source_id("cards"), "ds-1")
+
+    def test_views_swap_is_logged_only_and_reads_delegate(self):
+        inner = _Inner()
+        views = DryRunNotionViewsClient(inner)
+        self.assertEqual(views.describe_swap("linked"), ViewSwap(True, "g"))
+        self.assertEqual(views.board_property_ids("cards"), ("role-id", "order-id"))
+        with self.assertLogs(
+            "src.infrastructure.notion.dry_run_reading_list_repository", level="INFO"
+        ):
+            self.assertFalse(views.swap_gallery_for_board("linked", "cards", "rl-1"))
+        self.assertEqual(inner.writes, [])
 
 
 class _Finder:
@@ -168,6 +190,10 @@ class TestContainerWiring(unittest.TestCase):
         uc = build_use_case(self._settings())
         self.assertIsInstance(uc.page_use_case, CompleteReadingListPageUseCase)
         self.assertTrue(uc.should_complete_page("任何書"))
+
+    def test_dry_run_flag_reaches_page_use_case(self):
+        self.assertTrue(build_use_case(self._settings(dry_run=True)).page_use_case._dry_run)
+        self.assertFalse(build_use_case(self._settings()).page_use_case._dry_run)
 
     def test_dry_run_wraps_writes(self):
         uc = build_use_case(self._settings(dry_run=True))

@@ -96,12 +96,14 @@ class _FakeReadingList:
 class _FakeViews:
     """建立成功時在「筆記圖」標題後插入一個 child_database block，模擬真實頁面。"""
 
-    def __init__(self, reading_list, fail=False):
+    def __init__(self, reading_list, fail=False, events=None):
         self.rl = reading_list
         self.fail = fail
         self.calls = []
+        self.events = events if events is not None else []
 
-    def create_card_gallery(self, page_id, cards_database_id, book_page_id, after_block_id):
+    def create_card_board(self, page_id, cards_database_id, book_page_id, after_block_id):
+        self.events.append("create_card_board")
         self.calls.append((page_id, cards_database_id, book_page_id, after_block_id))
         if self.fail:
             raise RuntimeError("views api down")
@@ -111,9 +113,19 @@ class _FakeViews:
 
 
 class _FakeCards:
-    def __init__(self, cards):
+    def __init__(self, cards, events=None, ensure_fails=False):
         self.cards = cards
         self.calls = 0
+        self.ensure_calls = 0
+        self.ensure_fails = ensure_fails
+        self.events = events if events is not None else []
+
+    def ensure_card_board_columns(self):
+        self.events.append("ensure_card_board_columns")
+        self.ensure_calls += 1
+        if self.ensure_fails:
+            raise RuntimeError("notion down")
+        return []
 
     def list_book_cards(self, books_page_id):
         self.calls += 1
@@ -139,7 +151,8 @@ def _psych_cards():
     return [BookCard(page_id=f"c{i}", title="卡", tags=["💞心理學"]) for i in range(3)]
 
 
-def _use_case(rl, views=None, cards=None, cover=FILE_ID, cards_db="cards-db", uploader=None):
+def _use_case(rl, views=None, cards=None, cover=FILE_ID, cards_db="cards-db", uploader=None,
+              dry_run=False):
     return CompleteReadingListPageUseCase(
         reading_list=rl,
         card_repo=cards if cards is not None else _FakeCards(_psych_cards()),
@@ -147,6 +160,7 @@ def _use_case(rl, views=None, cards=None, cover=FILE_ID, cards_db="cards-db", up
         cover_uploader=uploader or _FakeUploader(cover),
         cards_database_id=cards_db,
         type_mapping=dict(DEFAULT_BOOK_TYPE_MAPPING),
+        dry_run=dry_run,
     )
 
 
@@ -164,10 +178,13 @@ def _image(image, block_id="img-1"):
 
 
 class TestCompleteReadingListPage(unittest.TestCase):
-    def test_blank_page_gets_skeleton_gallery_cover_and_type(self):
+    def test_blank_page_gets_skeleton_board_cover_and_type(self):
         rl = _FakeReadingList(_page())
-        views = _FakeViews(rl)
-        _use_case(rl, views).execute(BOOK, "kobo-1")
+        events = []
+        views = _FakeViews(rl, events=events)
+        cards = _FakeCards(_psych_cards(), events=events)
+        _use_case(rl, views, cards).execute(BOOK, "kobo-1")
+        self.assertEqual(events, ["ensure_card_board_columns", "create_card_board"])
 
         self.assertEqual(len(rl.appended), 1)
         headings = [block_text(b) for b in rl.appended[0] if b["type"] == "heading_2"]
@@ -240,7 +257,38 @@ class TestCompleteReadingListPage(unittest.TestCase):
         self.assertIn({"properties": None, "cover_file_id": FILE_ID, "icon_file_id": FILE_ID},
                       rl.updates)
 
-    def test_renamed_notes_heading_skips_gallery(self):
+    def test_dry_run_never_creates_columns(self):
+        rl = _FakeReadingList(_page())
+        views = _FakeViews(rl)
+        cards = _FakeCards(_psych_cards())
+        _use_case(rl, views, cards, dry_run=True).execute(BOOK, "kobo-1")
+        self.assertEqual(cards.ensure_calls, 0)
+        self.assertEqual(len(views.calls), 1)
+
+    def test_column_failure_skips_board_but_not_other_steps_and_is_retried(self):
+        rl = _FakeReadingList(_page())
+        views = _FakeViews(rl)
+        cards = _FakeCards(_psych_cards(), ensure_fails=True)
+        use_case = _use_case(rl, views, cards)
+        with self.assertLogs(UC_LOGGER, level="WARNING"):
+            use_case.execute(BOOK, "kobo-1")
+        self.assertEqual(views.calls, [])
+        self.assertTrue([u for u in rl.updates if u["properties"]])
+        cards.ensure_fails = False
+        use_case.execute(BOOK, "kobo-1")
+        self.assertEqual(len(views.calls), 1)
+
+    def test_non_blank_notes_section_is_left_alone(self):
+        """既有 gallery 的取代是 Task 7 工具的事；段落有內容就不動。"""
+        rl = _FakeReadingList(
+            _page(), blocks=[_heading("書籍資料"), _heading("筆記圖"),
+                             {"type": "child_database", "id": "db-1"}])
+        views = _FakeViews(rl)
+        cards = _FakeCards(_psych_cards())
+        _use_case(rl, views, cards).execute(BOOK, "kobo-1")
+        self.assertEqual((views.calls, cards.ensure_calls), ([], 0))
+
+    def test_renamed_notes_heading_skips_board(self):
         rl = _FakeReadingList(_page(), blocks=[_heading("書籍資料"), _heading("卡片")])
         views = _FakeViews(rl)
         with self.assertLogs(UC_LOGGER, level="WARNING") as logs:
@@ -249,7 +297,7 @@ class TestCompleteReadingListPage(unittest.TestCase):
         self.assertEqual(rl.appended, [])
         self.assertTrue(any(SECTION_NOTES in line for line in logs.output))
 
-    def test_gallery_failure_does_not_raise_and_is_retried(self):
+    def test_board_failure_does_not_raise_and_is_retried(self):
         rl = _FakeReadingList(_page())
         views = _FakeViews(rl, fail=True)
         use_case = _use_case(rl, views)
@@ -285,7 +333,7 @@ class TestCompleteReadingListPage(unittest.TestCase):
             _use_case(rl, _FakeViews(rl)).execute(BOOK, "kobo-1")
         self.assertFalse([u for u in rl.updates if u["properties"]])
 
-    def test_without_cards_db_no_gallery_and_no_type(self):
+    def test_without_cards_db_no_board_and_no_type(self):
         rl = _FakeReadingList(_page())
         views = _FakeViews(rl)
         use_case = CompleteReadingListPageUseCase(
