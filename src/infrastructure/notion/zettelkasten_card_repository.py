@@ -20,7 +20,9 @@ as blocks.
 Review scores are deliberately NOT written to Notion. The review gate
 (`CardReviewer`) decides whether a card gets here at all; every card in the DB
 has already passed, so a score column would be noise. The scores live in
-`cards_output/*.json` and the run log.
+`cards_output/*.json` and the run log. The one exception is a card the user
+marked 🔧待修正: tools/revise_cards.py appends its result there, on request, as a
+block the user deletes after reading.
 """
 import logging
 import re
@@ -33,9 +35,12 @@ from zettelkasten_generator import ZettelkastenCard
 
 from ...domain.entities.board_card import BoardCard, CardUpdate
 from ...domain.entities.book_card import BookCard
+from ...domain.entities.card_revision import CardBlock
 from ...domain.entities.infographic_spec import MarkedCard
+from ...domain.services.card_revision_rules import is_result_heading
 from ..persistence.card_store import card_source_id
 from .card_visuals import cover_url_for
+from .highlight_page_blocks import split_rich_text
 from .rate_limiter import NotionRateLimiter
 from .reading_list_repository import ReadingListRepository
 from .retry_policy import retry_with_backoff
@@ -62,8 +67,10 @@ _RELATED_PROPERTY = "相關卡片"
 # 語意完全不同（見 docs/NOTION_OUTPUT_IMPROVEMENTS.md），同名會混淆。
 _STAGE_PROPERTY = "加工狀態"
 _STAGE_UNPROCESSED = "🌱未加工"
+_STAGE_NEEDS_FIX = "🔧待修正"   # 使用者標記：請 tools/revise_cards.py 重審
 _STAGE_REWRITTEN = "🌿已重寫"
 _STAGE_PERMANENT = "🌳永久筆記"
+_STAGE_DISCARDED = "🗑️淘汰"    # 不要這張，但別刪：頁面留著，查重才不會讓它之後長回來
 # 建立日期用 Notion 的 created_time 型別：值由 Notion 自己算，舊卡也立即有值。
 _CREATED_PROPERTY = "建立日期"
 _REVIEWED_PROPERTY = "上次回顧"
@@ -322,6 +329,76 @@ class ZettelkastenCardRepository:
                 texts.append(text)
         return " ".join(texts)
 
+    def list_cards_marked_for_revision(self) -> List[BoardCard]:
+        """Cards the user marked 🔧待修正. Read-only.
+
+        A 卡片盒 without the column has nothing marked (returns []) — querying a
+        property that does not exist is a 400. API failures propagate.
+        """
+        known = self._known_properties()
+        if known is not None and _STAGE_PROPERTY not in known:
+            logger.info(f"卡片盒沒有「{_STAGE_PROPERTY}」欄，視為沒有標記的卡")
+            return []
+        pages = self._query_all(
+            {"property": _STAGE_PROPERTY, "select": {"equals": _STAGE_NEEDS_FIX}}
+        )
+        return [self._to_board_card(page) for page in pages]
+
+    def read_card_blocks(self, page_id: str) -> List[CardBlock]:
+        """A card page in reading order, nested blocks flattened in place.
+
+        Unlike `card_text` this keeps every block type, because hand-edited cards
+        use lists and quotes. The old 📖 callout is metadata, not content, and an
+        earlier review result is not read into. One page of blocks per level is
+        enough for a card. API failures propagate.
+        """
+        blocks: List[CardBlock] = []
+        result = retry_with_backoff(
+            lambda: self._client.blocks.children.list(block_id=page_id, page_size=100),
+            self._rate_limiter,
+        ) or {}
+        for block in result.get("results", []):
+            if is_chapter_callout(block):
+                continue
+            kind = block.get("type", "")
+            rich = (block.get(kind) or {}).get("rich_text") or []
+            text = "".join(p.get("plain_text", "") for p in rich)
+            blocks.append(CardBlock(kind, text))
+            if block.get("has_children") and not is_result_heading(kind, text.strip()):
+                blocks.extend(self.read_card_blocks(block.get("id", "")))
+        return blocks
+
+    def append_revision_result(self, page_id: str, heading: str, lines: List[str]) -> None:
+        """Append one collapsed review result to the end of a card page. The
+        card's own text is never touched. API failures propagate."""
+        toggle = {
+            "object": "block",
+            "type": "toggle",
+            "toggle": {
+                "rich_text": split_rich_text(heading),
+                "children": [
+                    {
+                        "object": "block",
+                        "type": "paragraph",
+                        "paragraph": {"rich_text": split_rich_text(line)},
+                    }
+                    for line in lines
+                ],
+            },
+        }
+        retry_with_backoff(
+            lambda: self._client.blocks.children.append(block_id=page_id, children=[toggle]),
+            self._rate_limiter,
+        )
+
+    def book_title(self, book_page_id: str) -> str:
+        """Title of a Books-DB page. API failures propagate."""
+        page = retry_with_backoff(
+            lambda: self._client.pages.retrieve(page_id=book_page_id),
+            self._rate_limiter,
+        ) or {}
+        return ReadingListRepository.page_title(page)
+
     def list_chapter_callouts(self) -> List[Tuple[str, str, str]]:
         """(card title, block id, text) of every top-level 📖 chapter callout in
         the card box. One page of blocks per card is enough. API failures
@@ -493,8 +570,10 @@ class ZettelkastenCardRepository:
                 "select": {
                     "options": [
                         {"name": _STAGE_UNPROCESSED},
+                        {"name": _STAGE_NEEDS_FIX},
                         {"name": _STAGE_REWRITTEN},
                         {"name": _STAGE_PERMANENT},
+                        {"name": _STAGE_DISCARDED},
                     ]
                 }
             }

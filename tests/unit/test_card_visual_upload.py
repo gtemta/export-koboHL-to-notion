@@ -88,10 +88,10 @@ class TestSchemaAdditions(unittest.TestCase):
         self.assertIn(_CREATED_PROPERTY, add)
         self.assertIn(_REVIEWED_PROPERTY, add)
 
-    def test_stage_seeds_three_options(self):
+    def test_stage_seeds_all_options(self):
         add = ZettelkastenCardRepository._schema_additions({})
         names = [o["name"] for o in add[_STAGE_PROPERTY]["select"]["options"]]
-        self.assertEqual(len(names), 3)
+        self.assertEqual(len(names), 5)
         self.assertIn(_STAGE_UNPROCESSED, names)
 
     def test_created_is_created_time_type(self):
