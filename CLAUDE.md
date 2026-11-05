@@ -39,6 +39,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   哪些卡）／不帶則產出。處理卡片盒裡**勾選「做圖」**的卡，每張產一個 HTML 到
   `infographics_out/<書名>/<卡片標題>.html`，再用 Figma `html.to.design` 外掛匯入成可編輯
   圖層；詳見「卡片概念圖卡」。已產生過的卡略過，`--force` 重做。需要地端 Ollama。
+- **Card revision**: `python tools/revise_cards.py --dry-run`（只列出每張卡會怎樣）／不帶則執行。
+  處理卡片盒裡 `加工狀態` 標 **🔧待修正** 的卡：審核目前版本，內文有「待修正的點」就再重產候選版，
+  結果寫到頁尾、**內文不動**；詳見「卡片重審」。需要地端 Ollama。
 
 ### Quality gates
 - **Lint**: `python -m ruff check .` (config in `pyproject.toml`; `legacy/` + `analysis/` excluded)
@@ -89,12 +92,15 @@ src/
 │   ├── services/chapter_extractor.py    — Strategy-based chapter name fallback
 │   ├── services/reading_list_rules.py   — 卡片 Tags 多數決 → 書籍種類（純函式）
 │   ├── entities/infographic_spec.py     — InfographicSpec / Node / Neighbor / MapEntry / MarkedCard
-│   └── services/infographic_rules.py    — 模型原始 JSON → 可信規格／全書地圖（純函式）
+│   ├── services/infographic_rules.py    — 模型原始 JSON → 可信規格／全書地圖（純函式）
+│   ├── entities/card_revision.py        — CardBlock / CardBody / Verdict / Candidate
+│   └── services/card_revision_rules.py  — 讀懂卡片頁、版本指紋、組重審結果（純函式）
 ├── application/
 │   ├── use_cases/sync_books_use_case.py — SyncBooksUseCase.execute()
 │   ├── use_cases/generate_book_cards_use_case.py — Zettelkasten card post-sync step
 │   ├── use_cases/complete_reading_list_page_use_case.py — Reading List 書頁補完（M1）
 │   ├── use_cases/make_card_infographic_use_case.py — 勾選的卡 → 概念圖卡 HTML
+│   ├── use_cases/revise_cards_use_case.py — 標 🔧待修正 的卡 → 重審結果寫到頁尾
 │   └── dtos/sync_result.py
 └── infrastructure/                      — Adapters for external systems
     ├── persistence/
@@ -146,8 +152,8 @@ to the generator, persists the batch via `CardStore`, then uploads through
 - **審核不可用**（Ollama 沒開／模型沒 pull／回應解析不出 JSON）→ 該本書
   **一張卡都不上傳**，log ERROR。`CardReviewer.is_available()` 會檢查模型是否
   真的 pull 過，才能區分「服務沒開」與「模型沒下載」。
-- **Notion 不留任何審核痕跡**：沒有品質分數欄、沒有狀態欄、沒有審稿 toggle。
-  分數只在 `cards_output/*.json`（`review_scores`/`review_status`/`review_model`/
+- **Notion 不留任何審核痕跡**：沒有品質分數欄、沒有狀態欄、沒有審稿 toggle
+  （唯一例外是使用者主動要求重審的卡，見「卡片重審」）。分數只在 `cards_output/*.json`（`review_scores`/`review_status`/`review_model`/
   `regenerated`）與 log 裡。被退的卡存進同一份 JSON 的 `rejected` 頂層鍵，
   `CardStore.load_pending` 只讀 `cards`，所以續傳絕不會誤傳被退的卡。
 - **並行安全**：書籍走 `ThreadPoolExecutor` 且共用同一個 generator 實例，審核狀態
@@ -313,6 +319,35 @@ to the generator, persists the batch via `CardStore`, then uploads through
   四種版面匯入後的圖層品質還沒看過。本機沒有 `cards_output/`，真實卡片的端到端沒跑過（只用合成卡片
   ＋真 Ollama 驗證過流程與版面截圖）。
 
+### 卡片重審（2026-11-06）
+
+使用者手動改過或不滿意的卡，要再審或重產就走 `tools/revise_cards.py`。實作：
+`revise_cards_use_case.py`（流程）、`card_revision_rules.py`（純規則）。
+
+- **`加工狀態` 是唯一的狀態欄**：🌱未加工（程式預設）→ 🔧待修正（請工具重審）→ 🌿已重寫 → 🌳永久筆記，
+  另有 🗑️淘汰。「看過、沒問題、也沒改」就填 `上次回顧`，卡片會離開「待處理項目」view。
+  舊的 `狀態`、`品質分數` 沒有任何程式讀寫，view 也不再使用。
+- **觸發**：標 🔧。內文有以「待修正的點」開頭的段落（可以接清單、可以多段）→ 模型依此重產候選版，兩版都審；
+  沒有 → 只審目前版本。一個狀態、由有沒有寫指示決定行為；`--dry-run` 會逐張列出。
+- **模型只給意見，內文永遠不動**：結果是頁尾一個 toggle（`🤖 重審結果 日期｜…〔指紋〕`）。要用候選版本由使用者
+  自己複製，狀態也由使用者改，工具都不碰。
+- **審核是參考，不是閘門**：閘門的 prompt 沒改，`correctness` 會扣「原文沒寫」的內容，而使用者自己加的想法正是
+  永久筆記該有的，所以低分不會刪卡或擋下結果，只附一句提醒。
+- **內容從 Notion 讀，不靠 `cards_output/`**：本地 JSON 是手改之前的舊版，也不一定在這台機器上。本文＝第一個
+  quote 以外的所有文字（含清單、巢狀 block）；第一個 quote＝原文劃線，沒有就略過，無從對照。2024–2025 的手作卡
+  多半是圖片加清單，沒有 quote。重產只看頁面，所以不會帶入 Kobo 的讀者註記。
+- **明確標記，不自動偵測手改**：`Last edited time` 改屬性或跑腳本也會變，分不出內容有沒有動過。
+- **重跑冪等靠指紋**：sha1(標題＋本文＋原文＋待修正的點) 放在 toggle 標題，只讀頂層 block 就能判斷，這個版本審過
+  就不花模型時間。刪掉結果區塊或改內容就會再審（舊區塊不自動刪，要使用者自己清）。任何一步失敗都不寫入，重跑會再試。
+- **為什麼不用留言**：integration 沒有留言權限（`comments.list` 實測 403，2026-11-06），也不值得為此多開權限。
+- **不要用「刪卡再同步」來重產，淘汰也不要刪卡**：查重看的是 Notion 上現存的 `來源劃線ID`，而選劃線的規則是固定的，
+  刪掉的卡下次開卡片流程同步時很可能長回來。要淘汰就標 🗑️，頁面留著查重才擋得住。
+- **驗證狀態（2026-11-06）**：Notion 讀寫以暫時測試卡＋假模型實測過（結果區塊、超過 2000 字的段落、重跑略過、內文與
+  指紋不變）；**真實模型的端到端還沒跑成**，當時連 2.4 GB 的模型都載不起來，原因見下一點。
+- **`cudaMalloc failed: out of memory` 不一定是顯存不足**：Windows 配置顯存也要系統提交額度。當時 GPU 空閒 6.7 GB，
+  但提交額度 63.9 GB 只剩 2 GB，換小模型、`num_gpu: 0` 全部失敗。先看
+  `(Get-CimInstance Win32_OperatingSystem).FreeVirtualMemory`，再懷疑模型或顯卡。
+
 ### Entry point flow
 
 `main.py` → `Settings.from_env()` → `container.build_use_case(settings)` → `SyncBooksUseCase.execute()`.
@@ -401,9 +436,9 @@ Run legacy via `python -m legacy.uploadToNotion` (the module adjusts `sys.path` 
   list), `來源劃線ID` (rich_text, enables per-highlight dedup). The old `主題`,
   `品質分數` and `狀態` columns are no longer written — review results stay local
   (see 卡片審核閘門). Existing columns in the user's DB are left alone, just unused.
-  回訪／視覺欄位（同樣由 `_ensure_schema` 自動建立）：`加工狀態` (select：
-  🌱未加工/🌿已重寫/🌳永久筆記，建卡時一律寫 🌱)、`建立日期` (created_time，值由
-  Notion 自算)、`上次回顧` (date，純手動)。每張卡另有 page **cover**（依 Tags 分類
+  回訪／視覺欄位（同樣由 `_ensure_schema` 自動建立，**刪了下次卡片同步會建回來**）：
+  `加工狀態` (select：🌱未加工/🔧待修正/🌿已重寫/🌳永久筆記/🗑️淘汰，建卡時一律寫 🌱，見「卡片重審」)、
+  `建立日期` (created_time，值由 Notion 自算)、`上次回顧` (date，純手動)。每張卡另有 page **cover**（依 Tags 分類
   對應 Notion 內建漸層，`card_visuals.cover_url_for`）與 page **icon**（emoji）。
   ⚠️ **gallery view 需手動把 Card preview 設為 Page cover**，色卡才會顯示 ——
   Notion API 無法修改 view 設定。
@@ -444,6 +479,9 @@ Run legacy via `python -m legacy.uploadToNotion` (the module adjusts `sys.path` 
 
 ### Known Cleanup Debt
 
+- **卡片流程先跑模型才查重**：`ENABLE_ZETTELKASTEN_CARDS=true` 時，每次同步每本已匯出的書都會先跑完整輪產卡與
+  審核（`generate_book_cards_use_case.py`），上傳時才用 `來源劃線ID` 丟掉已有的卡。卡片不會重複，但模型時間白花。
+- **🗑️淘汰 的卡仍算在書裡**：看板、全書地圖、書籍種類、重審的同書脈絡都還沒排除它們。
 - `tests/` still has overlapping `test_chapter_extraction.py` at root-level and in `tests/unit/` (both green and importing `src.*` since d998391) — merge into one. `tests/integration/` is empty.
 - `analysis/` contains one-shot debug scripts; candidates for deletion. (Excluded from ruff along with `legacy/`.)
 - `docs/` is full of past refactor plans (REFACTOR_PLAN.md etc.) that could be archived.
