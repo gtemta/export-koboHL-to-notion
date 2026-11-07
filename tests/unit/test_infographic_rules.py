@@ -192,6 +192,9 @@ class TestLayoutAndRole(unittest.TestCase):
     def test_unknown_role_falls_back_to_case(self):
         self.assertEqual(_spec(_raw(role="配角")).role, "案例")
 
+    def test_support_is_an_alias_of_pillar_in_a_single_card_spec_too(self):
+        self.assertEqual(_spec(_raw(role="支撐")).role, "支柱")
+
     def test_every_known_layout_is_accepted(self):
         for layout in ("flow", "contrast", "cause", "hierarchy", "cycle"):
             self.assertEqual(_spec(_raw(layout=layout)).layout, layout)
@@ -272,7 +275,7 @@ class TestNormalizeBookMap(unittest.TestCase):
 
     def test_every_title_gets_an_entry_even_if_the_model_skipped_it(self):
         raw = _map_raw(cards=[{"n": 1, "role": "主軸", "neighbors": []}])
-        _, entries = normalize_book_map(raw, TITLES)
+        _, entries = normalize_book_map(raw, TITLES, min_coverage=0.0)
         self.assertEqual(set(entries), set(TITLES))
         self.assertEqual(entries["環境設計"].role, "案例")
         self.assertEqual(entries["環境設計"].neighbors, [])
@@ -285,12 +288,12 @@ class TestNormalizeBookMap(unittest.TestCase):
             {"relation": "導向", "n": "3"},
             {"relation": "導向", "n": True},
         ]}])
-        _, entries = normalize_book_map(raw, TITLES)
+        _, entries = normalize_book_map(raw, TITLES, min_coverage=0.0)
         self.assertEqual(entries["改變身分"].neighbors, [])
 
     def test_unknown_role_falls_back_to_case(self):
         raw = _map_raw(cards=[{"n": 1, "role": "配角", "neighbors": []}])
-        _, entries = normalize_book_map(raw, TITLES)
+        _, entries = normalize_book_map(raw, TITLES, min_coverage=0.0)
         self.assertEqual(entries["習慣是複利"].role, "案例")
 
     def test_neighbors_are_capped_and_deduped(self):
@@ -299,7 +302,7 @@ class TestNormalizeBookMap(unittest.TestCase):
             {"relation": "對照", "n": 3}, {"relation": "前提", "n": 4},
             {"relation": "導向", "n": 4},
         ]}])
-        _, entries = normalize_book_map(raw, TITLES)
+        _, entries = normalize_book_map(raw, TITLES, min_coverage=0.0)
         self.assertEqual(
             [n.title for n in entries["習慣是複利"].neighbors],
             ["改變身分", "環境設計", "兩分鐘法則"],
@@ -322,11 +325,19 @@ class TestNormalizeBookMap(unittest.TestCase):
         theme, _ = normalize_book_map(_map_raw(theme=["x"]), TITLES)
         self.assertEqual(theme, "")
 
-    def test_one_placed_card_is_enough_to_count_as_a_map(self):
-        raw = {"cards": [{"n": 2, "role": "主軸", "neighbors": []}]}
-        theme, entries = normalize_book_map(raw, TITLES)
-        self.assertEqual(entries["改變身分"].role, "主軸")
-        self.assertEqual(entries["習慣是複利"].role, "案例")
+    def test_support_is_an_alias_of_pillar(self):
+        raw = _map_raw(cards=[{"n": i, "role": "支撐", "neighbors": []} for i in range(1, 5)])
+        _, entries = normalize_book_map(raw, TITLES)
+        self.assertEqual({e.role for e in entries.values()}, {"支柱"})
+
+    def test_under_eighty_percent_placed_is_not_a_map(self):
+        raw = _map_raw(cards=[{"n": i, "role": "支柱", "neighbors": []} for i in range(1, 4)])
+        self.assertIsNone(normalize_book_map(raw, TITLES))      # 3/4 = 75%
+
+    def test_eighty_percent_placed_is_a_map_and_the_rest_default(self):
+        raw = _map_raw(cards=[{"n": i, "role": "支柱", "neighbors": []} for i in range(1, 5)])
+        _, entries = normalize_book_map(raw, TITLES + ["第五張"])
+        self.assertEqual(entries["第五張"].role, "案例")
 
 
 if __name__ == "__main__":

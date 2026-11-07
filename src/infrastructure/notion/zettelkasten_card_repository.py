@@ -31,6 +31,7 @@ from notion_client import Client
 # zettelkasten_generator lives at project root (not yet ported into src/)
 from zettelkasten_generator import ZettelkastenCard
 
+from ...domain.entities.board_card import BoardCard, CardUpdate
 from ...domain.entities.book_card import BookCard
 from ...domain.entities.infographic_spec import MarkedCard
 from ..persistence.card_store import card_source_id
@@ -50,6 +51,12 @@ _KEYWORD_PROPERTY = "Key Word"
 _TAGS_PROPERTY = "Tags"
 # 使用者勾選「要做概念圖」的 checkbox；只由 tools/make_card_infographic.py 建立。
 _INFOGRAPHIC_PROPERTY = "做圖"
+
+# 書頁看板用的欄位；只由 ensure_card_board_columns() 建立，不進一般同步的 schema。
+_ROLE_PROPERTY = "角色"
+_ROLE_OPTIONS = ("主軸", "支柱", "案例")
+_ORDER_PROPERTY = "閱讀順序"
+_RELATED_PROPERTY = "相關卡片"
 
 # 回訪機制用的欄位。加工狀態刻意不叫「狀態」——審核年代那個已退役的 `狀態` 欄
 # 語意完全不同（見 docs/NOTION_OUTPUT_IMPROVEMENTS.md），同名會混淆。
@@ -254,6 +261,129 @@ class ZettelkastenCardRepository:
             )
             for page in pages
         ]
+
+    def ensure_card_board_columns(self) -> List[str]:
+        """Create whichever of 角色/閱讀順序/相關卡片 the 卡片盒 lacks; returns the
+        names created by this call.
+
+        Like `ensure_infographic_column`, deliberately not part of
+        `_ensure_schema`: only the book-board flow needs these. When the schema
+        can't be read we don't write blind (returns []).
+        """
+        known = self._known_properties()
+        if known is None:
+            return []
+        wanted = {
+            _ROLE_PROPERTY: {"select": {"options": [{"name": n} for n in _ROLE_OPTIONS]}},
+            _ORDER_PROPERTY: {"number": {}},
+            # 單向關聯：只會建出這一欄（雙向的 dual_property 會多生一個反向欄）。
+            _RELATED_PROPERTY: {"relation": {
+                "database_id": self._database_id,
+                "type": "single_property",
+                "single_property": {},
+            }},
+        }
+        missing = {name: body for name, body in wanted.items() if name not in known}
+        if not missing:
+            return []
+        retry_with_backoff(
+            lambda: self._client.databases.update(
+                database_id=self._database_id, properties=missing,
+            ),
+            self._rate_limiter,
+        )
+        self._schema_props = self._fetch_property_names()
+        logger.info(f"卡片盒補上看板欄位：{'、'.join(missing)}")
+        return list(missing)
+
+    def list_board_cards(self) -> List[BoardCard]:
+        """Every titled card with its board fields (properties only).
+
+        Columns the DB lacks read as blank. API failures propagate on purpose:
+        the caller must not mistake a failed read for "no cards".
+        """
+        pages = self._query_all({"property": "標題", "title": {"is_not_empty": True}})
+        return [self._to_board_card(page) for page in pages]
+
+    def card_text(self, page_id: str) -> str:
+        """Top-level paragraph text of a card page, space-joined. One page of
+        blocks is enough for a card. API failures propagate."""
+        result = retry_with_backoff(
+            lambda: self._client.blocks.children.list(block_id=page_id, page_size=100),
+            self._rate_limiter,
+        ) or {}
+        texts = []
+        for block in result.get("results", []):
+            if block.get("type") != "paragraph":
+                continue
+            rich = (block.get("paragraph") or {}).get("rich_text") or []
+            text = "".join(p.get("plain_text", "") for p in rich).strip()
+            if text:
+                texts.append(text)
+        return " ".join(texts)
+
+    def list_chapter_callouts(self) -> List[Tuple[str, str, str]]:
+        """(card title, block id, text) of every top-level 📖 chapter callout in
+        the card box. One page of blocks per card is enough. API failures
+        propagate on purpose: a failed read must never look like "nothing to
+        clean"."""
+        found: List[Tuple[str, str, str]] = []
+        for page in self._query_all({"property": "標題", "title": {"is_not_empty": True}}):
+            page_id = page.get("id", "")
+            result = retry_with_backoff(
+                lambda pid=page_id: self._client.blocks.children.list(
+                    block_id=pid, page_size=100
+                ),
+                self._rate_limiter,
+            ) or {}
+            for block in result.get("results", []):
+                if not is_chapter_callout(block):
+                    continue
+                rich = (block.get("callout") or {}).get("rich_text") or []
+                text = "".join(p.get("plain_text", "") for p in rich).strip()
+                found.append((self._plain_title(page), block.get("id", ""), text))
+        return found
+
+    def delete_block(self, block_id: str) -> None:
+        """Archive one block. API failures propagate."""
+        retry_with_backoff(
+            lambda: self._client.blocks.delete(block_id=block_id),
+            self._rate_limiter,
+        )
+
+    def update_board_fields(self, update: CardUpdate) -> None:
+        """Write the non-None board fields of one card in a single call;
+        nothing to write → no API call. API failures propagate."""
+        props: dict = {}
+        if update.role is not None:
+            props[_ROLE_PROPERTY] = {"select": {"name": update.role}}
+        if update.reading_order is not None:
+            props[_ORDER_PROPERTY] = {"number": update.reading_order}
+        if update.related_ids is not None:
+            props[_RELATED_PROPERTY] = {"relation": [{"id": i} for i in update.related_ids]}
+        if not props:
+            return
+        retry_with_backoff(
+            lambda: self._client.pages.update(page_id=update.page_id, properties=props),
+            self._rate_limiter,
+        )
+
+    @classmethod
+    def _to_board_card(cls, page: dict) -> BoardCard:
+        props = (page or {}).get("properties") or {}
+        sources = (props.get("來源") or {}).get("relation") or []
+        related = props.get(_RELATED_PROPERTY) or {}
+        return BoardCard(
+            page_id=page.get("id", ""),
+            book_page_id=(sources[0].get("id", "") if sources else ""),
+            title=cls._plain_title(page),
+            source_id=cls._read_source_id_property(page),
+            created_time=page.get("created_time", ""),
+            role=((props.get(_ROLE_PROPERTY) or {}).get("select") or {}).get("name", ""),
+            reading_order=(props.get(_ORDER_PROPERTY) or {}).get("number"),
+            related_ids=tuple(r.get("id", "") for r in related.get("relation") or []),
+            related_complete=not related.get("has_more"),
+        )
 
     @staticmethod
     def _plain_title(page: dict) -> str:
@@ -625,25 +755,19 @@ class ZettelkastenCardRepository:
                 },
             })
 
-        # 章名可能被 _clean_chapter_reference 清成空字串（誤判成章名的劃線內文），
-        # 但進度是 Kobo 硬數據、永遠可信，不該一起消失。
-        if card.chapter_reference or card.chapter_progress:
-            progress = (
-                f"（進度 {card.chapter_progress:.0%}）"
-                if card.chapter_progress else ""
-            )
-            blocks.append({
-                "object": "block",
-                "type": "callout",
-                "callout": {
-                    "icon": {"type": "emoji", "emoji": "📖"},
-                    "rich_text": [{"type": "text", "text": {
-                        "content": f"{card.chapter_reference}{progress}"
-                    }}],
-                },
-            })
-
         return blocks
+
+
+def is_chapter_callout(block: dict) -> bool:
+    """True for the 📖 chapter/progress callout old cards carry (icon emoji 📖).
+
+    A callout with children never matches: sync only ever wrote childless ones,
+    so one with children was hand-edited, and deleting it would archive the
+    nested content too."""
+    if (block or {}).get("type") != "callout" or block.get("has_children"):
+        return False
+    icon = (block.get("callout") or {}).get("icon") or {}
+    return icon.get("type") == "emoji" and icon.get("emoji") == "📖"
 
 
 def _paragraph(text: str) -> dict:

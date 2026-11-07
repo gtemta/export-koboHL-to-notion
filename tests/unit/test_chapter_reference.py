@@ -178,35 +178,10 @@ def _card(**overrides):
     return ZettelkastenCard(**kwargs)
 
 
-class TestChapterCalloutFallsBackToProgress(unittest.TestCase):
-    """進度是 Kobo 硬數據，不該被章名的問題連坐。"""
-
-    @staticmethod
-    def _callouts(blocks):
-        return [b for b in blocks if b["type"] == "callout"
-                and b["callout"]["icon"]["emoji"] == "📖"]
-
-    def test_progress_only_callout_when_chapter_was_dropped(self):
-        blocks = _repo()._build_children(_card(chapter_reference="", chapter_progress=0.42))
-        callouts = self._callouts(blocks)
-        self.assertEqual(len(callouts), 1)
-        self.assertEqual(
-            callouts[0]["callout"]["rich_text"][0]["text"]["content"],
-            "（進度 42%）",
-        )
-
-    def test_no_callout_when_both_chapter_and_progress_are_empty(self):
-        blocks = _repo()._build_children(_card(chapter_reference="", chapter_progress=0.0))
-        self.assertEqual(self._callouts(blocks), [])
-
-    def test_chapter_and_progress_together_unchanged(self):
-        blocks = _repo()._build_children(
-            _card(chapter_reference="第一章", chapter_progress=0.42)
-        )
-        self.assertEqual(
-            self._callouts(blocks)[0]["callout"]["rich_text"][0]["text"]["content"],
-            "第一章（進度 42%）",
-        )
+class TestCardBodyHasNoChapterCallout(unittest.TestCase):
+    def test_no_callout_even_with_chapter_and_progress(self):
+        blocks = _repo()._build_children(_card(chapter_reference="第一章", chapter_progress=0.42))
+        self.assertEqual([b["type"] for b in blocks], ["paragraph", "quote"])
 
 
 if __name__ == "__main__":

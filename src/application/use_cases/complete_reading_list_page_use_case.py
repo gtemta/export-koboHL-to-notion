@@ -43,6 +43,7 @@ class CompleteReadingListPageUseCase:
         cover_uploader: CoverUploader,
         cards_database_id: Optional[str],
         type_mapping: Dict[str, str],
+        dry_run: bool = False,
     ):
         self._reading_list = reading_list
         self._card_repo = card_repo
@@ -50,6 +51,7 @@ class CompleteReadingListPageUseCase:
         self._cover_uploader = cover_uploader
         self._cards_database_id = cards_database_id
         self._type_mapping = type_mapping
+        self._dry_run = dry_run
 
     def execute(self, book: Book, kobo_page_id: str) -> None:
         page = self._reading_list.find_page(book.title, kobo_page_id)
@@ -82,7 +84,7 @@ class CompleteReadingListPageUseCase:
         elif broken_image is not None and file_id:
             self._reading_list.replace_image(broken_image["id"], file_id)
 
-        self._ensure_card_gallery(book, page_id, blocks)
+        self._ensure_card_board(book, page_id, blocks)
         self._ensure_cover(page, file_id)
         self._ensure_book_types(book, page)
 
@@ -94,21 +96,24 @@ class CompleteReadingListPageUseCase:
             logger.warning(f"'{book.title}' 封面上傳失敗（下次同步重試）: {e}")
             return None, True
 
-    def _ensure_card_gallery(self, book: Book, page_id: str, blocks) -> None:
+    def _ensure_card_board(self, book: Book, page_id: str, blocks) -> None:
         if self._views is None or not self._cards_database_id:
             return
         section = find_section(blocks, SECTION_NOTES)
         if section is None:
-            logger.warning(f"'{book.title}' 書頁找不到「{SECTION_NOTES}」段，跳過卡片 gallery")
+            logger.warning(f"'{book.title}' 書頁找不到「{SECTION_NOTES}」段，跳過卡片看板")
             return
         heading, body = section
         if not section_is_empty(body):
             return
         try:
-            self._views.create_card_gallery(
+            # 看板要用到的欄位（角色、閱讀順序等）先備齊；預覽時只讀不建。
+            if self._card_repo is not None and not self._dry_run:
+                self._card_repo.ensure_card_board_columns()
+            self._views.create_card_board(
                 page_id, self._cards_database_id, page_id, heading["id"])
         except Exception as e:  # noqa: BLE001 — 下次同步段落仍空白，會自動重試
-            logger.warning(f"'{book.title}' 卡片 gallery 建立失敗（下次同步重試）: {e}")
+            logger.warning(f"'{book.title}' 卡片看板建立失敗（下次同步重試）: {e}")
 
     def _ensure_cover(self, page: dict, file_id: Optional[str]) -> None:
         if not file_id:

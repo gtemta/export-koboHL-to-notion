@@ -21,7 +21,12 @@ LAYOUTS = ("flow", "contrast", "cause", "hierarchy", "cycle")
 DEFAULT_LAYOUT = "flow"
 ROLES = ("主軸", "支柱", "案例")
 DEFAULT_ROLE = "案例"          # 最保守：不替沒把握的卡宣稱它是全書主軸
+# 小模型常把「支柱」寫成近義詞（2026-11 實測 18 張卡的地圖全寫「支撐」，被當成未知值全壓成案例）。
+_ROLE_ALIASES = {"支撐": "支柱"}
 RELATIONS = ("前提", "導向", "對照")
+# 全書地圖至少要定位到這個比例的卡才算成功；實測回應只定位 18 張中的 1 張卻被當成成功，
+# 其餘 17 張全成預設角色、沒有前後關係，還被快取。
+MIN_MAP_COVERAGE = 0.8
 
 # 圖示白名單（Lucide 圖示名）。模型只能從這裡挑，不能自由生成——
 # 與 zettelkasten_generator._ICON_PALETTE 同一個作法。每個名字都要有對應的 SVG
@@ -115,6 +120,15 @@ def _clean_neighbors(value: Any, card_title: str, sibling_titles: Sequence[str])
     return neighbors[:MAX_NEIGHBORS]
 
 
+def clean_role(value: Any) -> str:
+    """模型給的角色 → 合法角色；已知別名收進正規值，其餘退回 DEFAULT_ROLE。"""
+    if isinstance(value, str):
+        value = _ROLE_ALIASES.get(value, value)
+        if value in ROLES:
+            return value
+    return DEFAULT_ROLE
+
+
 def normalize_spec(
     raw: Any, card_title: str, sibling_titles: Sequence[str]
 ) -> Optional[InfographicSpec]:
@@ -127,29 +141,29 @@ def normalize_spec(
     if not lines:
         return None
     layout = raw.get("layout")
-    role = raw.get("role")
     return InfographicSpec(
         card_title=card_title,
         lines=lines,
         nodes=_clean_nodes(raw.get("nodes")),
         layout=layout if layout in LAYOUTS else DEFAULT_LAYOUT,
-        role=role if role in ROLES else DEFAULT_ROLE,
+        role=clean_role(raw.get("role")),
         neighbors=_clean_neighbors(raw.get("neighbors"), card_title, sibling_titles),
     )
 
 
-def _is_card_number(value: Any, count: int) -> bool:
+def is_card_number(value: Any, count: int) -> bool:
     # bool 是 int 的子類別；True 不能當成第 1 張卡。字串數字也不收——寧缺勿猜。
     return isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= count
 
 
 def normalize_book_map(
-    raw: Any, titles: Sequence[str]
+    raw: Any, titles: Sequence[str], min_coverage: float = MIN_MAP_COVERAGE
 ) -> Optional[Tuple[str, Dict[str, MapEntry]]]:
     """全書概念地圖的原始輸出 → (全書主軸, {卡片標題: MapEntry})。
 
-    模型一張卡都沒定位到（合法 JSON 但形狀不對，是小模型最常見的失敗）時回傳 None——
-    若硬湊出「全部案例、沒有前後關係」的地圖，會被快取而永久壓平整本書。
+    定位到的卡少於 min_coverage（預設八成）時回傳 None——一張都沒定位到（合法 JSON 但
+    形狀不對）是小模型最常見的失敗，只定位到零星幾張也一樣；若硬湊出「大多是案例、
+    幾乎沒有前後關係」的地圖，會被快取而永久壓平整本書。
 
     模型用「編號」指卡（1 起算、對應 titles 順序）而不是複誦標題——小模型會改寫標題，
     編號則可以由程式精確對回。每張卡都保證有 entry：模型漏掉的卡退回預設角色、無鄰居，
@@ -165,18 +179,17 @@ def normalize_book_map(
     seen_cards = set()
     cards = data.get("cards")
     for item in cards if isinstance(cards, list) else []:
-        if not isinstance(item, dict) or not _is_card_number(item.get("n"), count):
+        if not isinstance(item, dict) or not is_card_number(item.get("n"), count):
             continue
         number = item["n"]
         if number in seen_cards:
             continue
         seen_cards.add(number)
-        role = item.get("role")
         entries[titles[number - 1]] = MapEntry(
-            role=role if role in ROLES else DEFAULT_ROLE,
+            role=clean_role(item.get("role")),
             neighbors=_map_neighbors(item.get("neighbors"), number, titles),
         )
-    if not seen_cards:
+    if not seen_cards or len(seen_cards) < count * min_coverage:
         return None
     return theme, entries
 
@@ -188,7 +201,7 @@ def _map_neighbors(value: Any, own_number: int, titles: Sequence[str]) -> List[N
         if not isinstance(item, dict):
             continue
         relation, number = item.get("relation"), item.get("n")
-        if relation not in RELATIONS or not _is_card_number(number, len(titles)):
+        if relation not in RELATIONS or not is_card_number(number, len(titles)):
             continue
         if number == own_number or number in seen:
             continue

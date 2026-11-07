@@ -2,13 +2,14 @@
 
 Reads go to the real repository; writes are logged only. Blocks "written" in
 this run are remembered per page, so the follow-up step (finding「筆記圖」to
-place the gallery) behaves as in a real run and the log shows the full plan.
+place the board) behaves as in a real run and the log shows the full plan.
 """
 import logging
 import threading
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .dry_run_notion_repository import DRY_RUN_PAGE_ID_PREFIX
+from .notion_views_client import ViewSwap
 from .reading_list_repository import describe_page_update
 
 logger = logging.getLogger(__name__)
@@ -96,9 +97,22 @@ class DryRunNotionViewsClient:
     def data_source_id(self, database_id: str) -> Optional[str]:
         return self._inner.data_source_id(database_id)
 
-    def create_card_gallery(self, page_id: str, cards_database_id: str,
-                            book_page_id: str, after_block_id: str) -> Optional[str]:
+    def board_property_ids(self, cards_database_id: str) -> Tuple[str, str]:
+        return self._inner.board_property_ids(cards_database_id)
+
+    def create_card_board(self, page_id: str, cards_database_id: str,
+                          book_page_id: str, after_block_id: str) -> Optional[str]:
         logger.info(
-            f"{_PREFIX} 將在書頁 {page_id} 的「筆記圖」後建立卡片 gallery"
+            f"{_PREFIX} 將在書頁 {page_id} 的「筆記圖」後建立卡片看板"
             f"（篩選 來源＝{book_page_id}）")
         return None
+
+    def describe_swap(self, linked_database_id: str) -> ViewSwap:
+        return self._inner.describe_swap(linked_database_id)
+
+    def swap_gallery_for_board(self, linked_database_id: str, cards_database_id: str,
+                               book_page_id: str) -> bool:
+        logger.info(
+            f"{_PREFIX} 將在 {linked_database_id} 加入卡片看板並刪除舊 gallery"
+            f"（篩選 來源＝{book_page_id}）")
+        return False

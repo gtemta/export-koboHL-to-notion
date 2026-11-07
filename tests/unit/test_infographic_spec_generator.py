@@ -87,15 +87,18 @@ class TestBuildBookMap(unittest.TestCase):
             "cards": [
                 {"n": 1, "role": "主軸", "neighbors": [{"relation": "導向", "n": 2}]},
                 {"n": 2, "role": "支柱", "neighbors": []},
+                {"n": 3, "role": "案例", "neighbors": []},
+                {"n": 4, "role": "案例", "neighbors": []},
             ],
         }, ensure_ascii=False)
         gen, fake, patcher = _generator(f"好的：\n```json\n{reply}\n```")
         self.addCleanup(patcher.stop)
-        theme, entries = gen.build_book_map("原子習慣", CARDS)
+        cards = CARDS + [_card("兩分鐘法則"), _card("第五張")]
+        theme, entries = gen.build_book_map("原子習慣", cards)
         self.assertEqual(theme, "習慣靠系統")
         self.assertEqual(entries["習慣是複利"].role, "主軸")
         self.assertEqual(entries["習慣是複利"].neighbors[0].title, "改變身分")
-        self.assertEqual(entries["環境設計"].role, "案例")      # 模型漏掉的卡 → 預設
+        self.assertEqual(entries["第五張"].role, "案例")        # 模型漏掉的卡 → 預設（4/5 仍算地圖）
         _, kwargs = fake.calls[0]
         self.assertEqual((kwargs["model"], kwargs["api_url"], kwargs["timeout_s"]), ("m1", "http://x/api/generate", 7))
         self.assertIs(kwargs["think"], False)
@@ -119,6 +122,86 @@ class TestBuildBookMap(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.assertIsNone(gen.build_book_map("原子習慣", []))
         self.assertEqual(fake.calls, [])
+
+
+class TestAskBookMap(unittest.TestCase):
+    def test_ask_book_map_returns_raw_json_without_normalizing(self):
+        gen, _, patcher = _generator('{"cards": [{"n": 1, "role": "支撐"}]}')
+        self.addCleanup(patcher.stop)
+        self.assertEqual(gen.ask_book_map("書", CARDS)["cards"][0]["role"], "支撐")
+
+    def test_unparseable_response_or_model_error_means_none(self):
+        gen, _, patcher = _generator("沒有 JSON")
+        self.addCleanup(patcher.stop)
+        self.assertIsNone(gen.ask_book_map("書", CARDS))
+        patcher.stop()
+        with mock.patch.object(spec_generator, "_ollama_generate", side_effect=RuntimeError("boom")):
+            self.assertIsNone(InfographicSpecGenerator(api_url="u", model="m").ask_book_map("書", CARDS))
+
+    def test_cards_only_need_title_and_content(self):
+        class Slim:
+            def __init__(self, title, content):
+                self.title, self.content = title, content
+
+        gen, fake, patcher = _generator("{}")
+        self.addCleanup(patcher.stop)
+        gen.ask_book_map("書", [Slim("甲", "內容甲"), Slim("乙", "內容乙")])
+        prompt = fake.calls[0][0]
+        self.assertIn("1. 甲｜內容甲", prompt)
+        self.assertIn("2. 乙｜內容乙", prompt)
+
+    def test_model_property_exposes_the_configured_name(self):
+        self.assertEqual(InfographicSpecGenerator(api_url="u", model="gemma4:12b").model, "gemma4:12b")
+
+
+def _tags_response(names, status=200):
+    response = mock.Mock(status_code=status)
+    response.json.return_value = {"models": [{"name": n} for n in names]}
+    return response
+
+
+class TestIsAvailable(unittest.TestCase):
+    def _gen(self, model="gemma4:12b"):
+        return InfographicSpecGenerator(api_url="http://x:11434/api/generate", model=model)
+
+    def test_true_when_the_model_is_installed(self):
+        with mock.patch.object(spec_generator.requests, "get", return_value=_tags_response(["gemma4:12b"])) as get:
+            self.assertTrue(self._gen().is_available())
+        self.assertEqual(get.call_args.args[0], "http://x:11434/api/tags")
+        self.assertEqual(get.call_args.kwargs["timeout"], 5)
+
+    def test_false_when_the_model_is_not_installed(self):
+        with mock.patch.object(spec_generator.requests, "get", return_value=_tags_response(["gemma4:12b"])):
+            with self.assertLogs(spec_generator.logger, level="ERROR") as logs:
+                self.assertFalse(self._gen("x").is_available())
+        self.assertIn("ollama pull x", "\n".join(logs.output))
+
+    def test_bare_model_name_matches_latest_tag(self):
+        with mock.patch.object(spec_generator.requests, "get", return_value=_tags_response(["gemma4:latest"])):
+            self.assertTrue(self._gen("gemma4").is_available())
+
+    def test_false_when_the_service_is_down(self):
+        with mock.patch.object(
+            spec_generator.requests, "get", side_effect=spec_generator.requests.ConnectionError("refused")
+        ):
+            with self.assertLogs(spec_generator.logger, level="ERROR"):
+                self.assertFalse(self._gen().is_available())
+
+    def test_false_on_error_status_or_non_json(self):
+        with mock.patch.object(spec_generator.requests, "get", return_value=_tags_response([], status=500)):
+            with self.assertLogs(spec_generator.logger, level="ERROR"):
+                self.assertFalse(self._gen().is_available())
+        bad = mock.Mock(status_code=200)
+        bad.json.side_effect = ValueError("no json")
+        with mock.patch.object(spec_generator.requests, "get", return_value=bad):
+            with self.assertLogs(spec_generator.logger, level="ERROR"):
+                self.assertFalse(self._gen().is_available())
+
+    def test_never_loads_the_model(self):
+        with mock.patch.object(spec_generator.requests, "get", return_value=_tags_response(["gemma4:12b"])):
+            with mock.patch.object(spec_generator, "_ollama_generate") as generate:
+                self._gen().is_available()
+        generate.assert_not_called()
 
 
 class TestGenerateCardSpec(unittest.TestCase):

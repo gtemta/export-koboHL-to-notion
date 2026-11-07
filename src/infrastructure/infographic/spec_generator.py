@@ -11,6 +11,8 @@ import logging
 import os
 from typing import Dict, Optional, Sequence, Tuple
 
+import requests
+
 from zettelkasten_generator import ZettelkastenCard, _ollama_generate
 
 from ...domain.entities.infographic_spec import MapEntry
@@ -61,7 +63,8 @@ def build_card_prompt(card: ZettelkastenCard, book_title: str, theme: str) -> st
 """
 
 
-def build_book_map_prompt(book_title: str, cards: Sequence[ZettelkastenCard]) -> str:
+def build_book_map_prompt(book_title: str, cards: Sequence) -> str:
+    """cards 只需有 `.title`、`.content`（ZettelkastenCard、BoardCard 都行）。"""
     listing = "\n".join(
         f"{i}. {c.title}｜{(c.content or '')[:_CONTENT_PREVIEW_CHARS]}"
         for i, c in enumerate(cards, start=1)
@@ -89,6 +92,35 @@ class InfographicSpecGenerator:
         self._model = model
         self._timeout_s = timeout_s
 
+    @property
+    def model(self) -> str:
+        return self._model
+
+    def is_available(self) -> bool:
+        """Ollama 有回應、且設定的模型確實裝了。只打 /api/tags，不會把模型載入。"""
+        url = self._api_url.replace("/api/generate", "/api/tags")
+        try:
+            response = requests.get(url, timeout=5)
+        except requests.RequestException as e:
+            logger.error(f"模型不可用：連不上 Ollama（{url}）：{e}")
+            return False
+        if response.status_code != 200:
+            logger.error(f"模型不可用：Ollama {url} 回 {response.status_code}")
+            return False
+        try:
+            installed = [m.get("name", "") for m in (response.json().get("models") or [])]
+        except ValueError:
+            logger.error(f"模型不可用：{url} 回傳非 JSON")
+            return False
+        if self._model not in installed and f"{self._model}:latest" not in installed:
+            logger.error(
+                f"模型不可用：{self._model} 尚未安裝"
+                f"（已安裝：{'、'.join(installed) or '無'}）。"
+                f"請先執行 `ollama pull {self._model}`。"
+            )
+            return False
+        return True
+
     def _ask(self, prompt: str, *, label: str, num_predict: int) -> Optional[dict]:
         try:
             raw = _ollama_generate(
@@ -112,15 +144,21 @@ class InfographicSpecGenerator:
             logger.warning(f"Ollama {label} 回應不是可解析的 JSON：{(raw or '')[:200]!r}")
         return parsed
 
+    def ask_book_map(self, book_title: str, cards: Sequence) -> Optional[dict]:
+        """全書地圖的模型原始回應（解析成 dict、未整理）；cards 只需有 `.title`、`.content`。
+
+        呼叫端自己用編號對回卡片，所以不必靠標題當鍵。"""
+        return self._ask(
+            build_book_map_prompt(book_title, cards), label="book-map", num_predict=2000
+        )
+
     def build_book_map(
         self, book_title: str, cards: Sequence[ZettelkastenCard]
     ) -> Optional[Tuple[str, Dict[str, MapEntry]]]:
         """(全書主軸, {卡片標題: MapEntry})；模型沒給出可用回應回傳 None。"""
         if not cards:
             return None
-        parsed = self._ask(
-            build_book_map_prompt(book_title, cards), label="book-map", num_predict=2000
-        )
+        parsed = self.ask_book_map(book_title, cards)
         if parsed is None:
             return None
         book_map = normalize_book_map(parsed, [c.title for c in cards])

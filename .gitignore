@@ -14,3 +14,4 @@ logs/
 venv/
 /nul
 /1.ini
+.superpowers/

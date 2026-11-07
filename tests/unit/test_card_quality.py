@@ -49,9 +49,9 @@ class TestNoReviewDataInNotion(unittest.TestCase):
         blocks = _repo(None)._build_children(_card())
         self.assertEqual([b for b in blocks if b["type"] == "toggle"], [])
 
-    def test_page_body_keeps_content_quote_and_chapter(self):
+    def test_page_body_keeps_content_and_quote(self):
         types = [b["type"] for b in _repo(None)._build_children(_card())]
-        self.assertEqual(types, ["paragraph", "quote", "callout"])
+        self.assertEqual(types, ["paragraph", "quote"])
 
 
 class TestSchemaGating(unittest.TestCase):
