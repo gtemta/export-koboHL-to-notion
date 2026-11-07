@@ -5,6 +5,7 @@ from dataclasses import replace
 from unittest import mock
 
 from src.application.dtos.card_board_report import CardBoardReport
+from src.application.use_cases import build_card_board_use_case as uc_module
 from src.application.use_cases.build_card_board_use_case import BuildCardBoardUseCase
 from src.domain.entities.board_card import BoardCard
 from tools.build_card_board import card_map_model, format_report, run
@@ -344,8 +345,12 @@ class TestFixRound1(unittest.TestCase):
 
     def test_no_warning_when_every_card_has_a_position(self):
         use_case, _ = build()
-        with self.assertNoLogs(UC_LOGGER, level="WARNING"):
+        # assertNoLogs 要 Python 3.10，CI 跑 3.8
+        with mock.patch.object(uc_module.logger, "warning") as warn, \
+                mock.patch.object(uc_module.logger, "error") as error:
             use_case.execute()
+        warn.assert_not_called()
+        error.assert_not_called()
 
 
 class TestBookPage(unittest.TestCase):
