@@ -27,11 +27,18 @@ _BOOK_QUERY = (
     "SELECT DISTINCT content.ContentId, content.Title, content.Subtitle, "
     "content.Attribution, content.DateLastRead, content.TimeSpentReading, "
     "content.Description, content.Publisher, content.___PercentRead, "
-    "content.LastTimeFinishedReading, content.ISBN "
+    "content.LastTimeFinishedReading, content.ISBN, content.ImageId "
     "FROM Bookmark "
     "INNER JOIN content ON Bookmark.VolumeID = content.ContentID "
     f"WHERE {_BOOKMARK_FILTER} "
     "ORDER BY content.Title"
+)
+
+# 書庫裡所有的書（不只有劃線的）：補 Reading List 封面時，手動建立的頁多半是沒劃線的書。
+_LIBRARY_QUERY = (
+    "SELECT ContentId, Title, Attribution, ISBN, ImageId FROM content "
+    "WHERE ContentType = 6 AND Title IS NOT NULL AND Title != '' "
+    "ORDER BY Title"
 )
 
 # Kobo 內建目錄：ContentType=9 是 spine（檔案閱讀順序）、899 是 TOC 條目（真實章節標題）
@@ -78,7 +85,7 @@ class KoboSqliteRepository(BookRepository):
                 for row in conn.execute(_BOOK_QUERY).fetchall():
                     (cid, title, subtitle, author, date_last_read,
                      time_spent, description, publisher, percent_read,
-                     last_finished, isbn) = row
+                     last_finished, isbn, image_id) = row
                     books.append(Book(
                         id=cid,
                         title=title or '',
@@ -91,12 +98,25 @@ class KoboSqliteRepository(BookRepository):
                         date_last_read=date_last_read,
                         time_spent_reading=time_spent,
                         last_time_finished_reading=last_finished,
+                        image_id=image_id,
                     ))
         except sqlite3.Error as e:
             logger.error(f"讀取書籍列表失敗: {e}", exc_info=True)
             raise
         logger.info(f"從 Kobo 資料庫讀出 {len(books)} 本書")
         return books
+
+    def get_library_books(self) -> List[Book]:
+        """Every book row on the device with a title — id/title/author/ISBN/ImageId only.
+        Meant for cover lookup, not for highlight sync (see get_all_books)."""
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(_LIBRARY_QUERY).fetchall()
+        except sqlite3.Error as e:
+            logger.error(f"讀取書庫失敗: {e}", exc_info=True)
+            raise
+        return [Book(id=cid, title=title, author=author, isbn=isbn, image_id=image_id)
+                for cid, title, author, isbn, image_id in rows]
 
     def get_highlights_with_chapters(self, book_id: str) -> List[Highlight]:
         raw: List[Highlight] = []

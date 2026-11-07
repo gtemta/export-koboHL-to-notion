@@ -24,7 +24,7 @@ class FakeNotionRepository:
     def update_book_metadata(self, page_id, book):
         self.write_calls.append(("metadata", page_id))
 
-    def add_book_cover(self, page_id, title, isbn=None):
+    def add_book_cover(self, page_id, book):
         self.write_calls.append(("cover", page_id))
 
 
@@ -40,7 +40,7 @@ class TestDryRunNotionRepository(unittest.TestCase):
         self.repo.create_book_entry("測試書")
         self.repo.sync_book_highlights("page-1", [highlight])
         self.repo.update_book_metadata("page-1", book)
-        self.repo.add_book_cover("page-1", "測試書")
+        self.repo.add_book_cover("page-1", book)
         self.assertEqual(self.inner.write_calls, [])
 
     def test_created_book_gets_fake_page_id_on_requery(self):

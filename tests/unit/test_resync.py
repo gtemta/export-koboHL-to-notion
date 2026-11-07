@@ -90,7 +90,7 @@ class _FakeNotionRepo:
     def update_book_metadata(self, page_id, book):
         pass
 
-    def add_book_cover(self, page_id, title, isbn=None):
+    def add_book_cover(self, page_id, book):
         pass
 
 

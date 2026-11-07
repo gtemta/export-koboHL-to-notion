@@ -17,6 +17,7 @@ class Book:
     date_last_read: Optional[datetime] = None
     time_spent_reading: Optional[int] = None
     last_time_finished_reading: Optional[datetime] = None
+    image_id: Optional[str] = None  # Kobo content.ImageId → Kobo 圖床書封
 
     def get_clean_title(self) -> str:
         """獲取不含副標題的清潔標題"""
