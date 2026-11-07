@@ -44,6 +44,7 @@ class Settings:
     zettelkasten_min_highlights: int = 10
     zettelkasten_max_cards: int = 16
     zettelkasten_cards_output_dir: str = "cards_output"
+    infographics_output_dir: str = "infographics_out"
     zettelkasten_tag_categories: List[str] = field(
         default_factory=lambda: list(DEFAULT_TAG_CATEGORIES)
     )
@@ -83,6 +84,7 @@ class Settings:
             zettelkasten_min_highlights=int(os.getenv("ZETTELKASTEN_MIN_HIGHLIGHTS", "10")),
             zettelkasten_max_cards=int(os.getenv("ZETTELKASTEN_MAX_CARDS", "16")),
             zettelkasten_cards_output_dir=os.getenv("ZETTELKASTEN_CARDS_OUTPUT_DIR", "cards_output"),
+            infographics_output_dir=os.getenv("INFOGRAPHICS_OUTPUT_DIR", "infographics_out"),
             zettelkasten_tag_categories=cls._parse_tag_categories(
                 os.getenv("ZETTELKASTEN_TAG_CATEGORIES")
             ),
